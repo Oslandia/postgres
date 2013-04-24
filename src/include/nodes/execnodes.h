@@ -685,6 +685,7 @@ typedef struct FuncExprState
 	 * argument values between calls, when setArgsValid is true.
 	 */
 	FunctionCallInfoData fcinfo_data;
+    bool nested;
 } FuncExprState;
 
 /* ----------------
