@@ -13,6 +13,7 @@
 #endif
 
 #include <ctype.h>
+#include <time.h>
 #ifdef HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -1579,9 +1580,9 @@ do_connect(char *dbname, char *user, char *host, char *port)
 	if (!o_conn && (!dbname || !user || !host || !port))
 	{
 		/*
-		 *	We don't know the supplied connection parameters and don't want
-		 *	to connect to the wrong database by using defaults, so require
-		 *	all parameters to be specified.
+		 * We don't know the supplied connection parameters and don't want to
+		 * connect to the wrong database by using defaults, so require all
+		 * parameters to be specified.
 		 */
 		psql_error("All connection parameters must be supplied because no "
 				   "database connection exists\n");
@@ -2102,7 +2103,7 @@ do_edit(const char *filename_arg, PQExpBuffer query_buf,
 /*
  * process_file
  *
- * Read commands from filename and then them to the main processing loop
+ * Reads commands from filename and passes them to the main processing loop.
  * Handler for \i and \ir, but can be used for other things as well.  Returns
  * MainLoop() error code.
  *
@@ -2647,17 +2648,32 @@ do_watch(PQExpBuffer query_buf, long sleep)
 				printQuery(res, &myopt, pset.queryFout, pset.logfile);
 				break;
 
+			case PGRES_COMMAND_OK:
+				fprintf(pset.queryFout, "%s\n%s\n\n", title, PQcmdStatus(res));
+				break;
+
 			case PGRES_EMPTY_QUERY:
 				psql_error(_("\\watch cannot be used with an empty query\n"));
 				PQclear(res);
 				return false;
 
+			case PGRES_COPY_OUT:
+			case PGRES_COPY_IN:
+			case PGRES_COPY_BOTH:
+				psql_error(_("\\watch cannot be used with COPY\n"));
+				PQclear(res);
+				return false;
+
 			default:
-				/* should we fail for non-tuple-result commands? */
-				break;
+				/* other cases should have been handled by PSQLexec */
+				psql_error(_("unexpected result status for \\watch\n"));
+				PQclear(res);
+				return false;
 		}
 
 		PQclear(res);
+
+		fflush(pset.queryFout);
 
 		/*
 		 * Set up cancellation of 'watch' via SIGINT.  We redo this each time

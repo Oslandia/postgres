@@ -140,10 +140,8 @@ ProcGlobalSemas(void)
  *	  running out when trying to start another backend is a common failure.
  *	  So, now we grab enough semaphores to support the desired max number
  *	  of backends immediately at initialization --- if the sysadmin has set
- *	  MaxConnections or autovacuum_max_workers higher than his kernel will
- *	  support, he'll find out sooner rather than later.  (The number of
- *	  background worker processes registered by loadable modules is also taken
- *	  into consideration.)
+ *	  MaxConnections, max_worker_processes, or autovacuum_max_workers higher
+ *	  than his kernel will support, he'll find out sooner rather than later.
  *
  *	  Another reason for creating semaphores here is that the semaphore
  *	  implementation typically requires us to create semaphores in the
@@ -186,8 +184,8 @@ InitProcGlobal(void)
 	 * five separate consumers: (1) normal backends, (2) autovacuum workers
 	 * and the autovacuum launcher, (3) background workers, (4) auxiliary
 	 * processes, and (5) prepared transactions.  Each PGPROC structure is
-	 * dedicated to exactly one of these purposes, and they do not move between
-	 * groups.
+	 * dedicated to exactly one of these purposes, and they do not move
+	 * between groups.
 	 */
 	procs = (PGPROC *) ShmemAlloc(TotalProcs * sizeof(PGPROC));
 	ProcGlobal->allProcs = procs;
@@ -291,7 +289,7 @@ InitProcess(void)
 		elog(ERROR, "you already exist");
 
 	/*
-	 * Initialize process-local latch support.  This could fail if the kernel
+	 * Initialize process-local latch support.	This could fail if the kernel
 	 * is low on resources, and if so we want to exit cleanly before acquiring
 	 * any shared-memory resources.
 	 */
@@ -476,7 +474,7 @@ InitAuxiliaryProcess(void)
 		elog(ERROR, "you already exist");
 
 	/*
-	 * Initialize process-local latch support.  This could fail if the kernel
+	 * Initialize process-local latch support.	This could fail if the kernel
 	 * is low on resources, and if so we want to exit cleanly before acquiring
 	 * any shared-memory resources.
 	 */
@@ -999,8 +997,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 					LockCheckConflicts(lockMethodTable,
 									   lockmode,
 									   lock,
-									   proclock,
-									   MyProc) == STATUS_OK)
+									   proclock) == STATUS_OK)
 				{
 					/* Skip the wait and just grant myself the lock. */
 					GrantLock(lock, proclock, lockmode);
@@ -1153,25 +1150,25 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			{
 				int			pid = autovac->pid;
 				StringInfoData locktagbuf;
-				StringInfoData logbuf;		/* errdetail for server log */
+				StringInfoData logbuf;	/* errdetail for server log */
 
 				initStringInfo(&locktagbuf);
 				initStringInfo(&logbuf);
 				DescribeLockTag(&locktagbuf, &lock->tag);
 				appendStringInfo(&logbuf,
-					  _("Process %d waits for %s on %s."),
-						 MyProcPid,
-						 GetLockmodeName(lock->tag.locktag_lockmethodid,
-										 lockmode),
-						 locktagbuf.data);
+								 _("Process %d waits for %s on %s."),
+								 MyProcPid,
+							  GetLockmodeName(lock->tag.locktag_lockmethodid,
+											  lockmode),
+								 locktagbuf.data);
 
 				/* release lock as quickly as possible */
 				LWLockRelease(ProcArrayLock);
 
 				ereport(LOG,
-						(errmsg("sending cancel to blocking autovacuum PID %d",
-							pid),
-						 errdetail_log("%s", logbuf.data)));
+					  (errmsg("sending cancel to blocking autovacuum PID %d",
+							  pid),
+					   errdetail_log("%s", logbuf.data)));
 
 				pfree(logbuf.data);
 				pfree(locktagbuf.data);
@@ -1386,8 +1383,7 @@ ProcLockWakeup(LockMethod lockMethodTable, LOCK *lock)
 			LockCheckConflicts(lockMethodTable,
 							   lockmode,
 							   lock,
-							   proc->waitProcLock,
-							   proc) == STATUS_OK)
+							   proc->waitProcLock) == STATUS_OK)
 		{
 			/* OK to waken */
 			GrantLock(lock, proc->waitProcLock, lockmode);

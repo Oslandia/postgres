@@ -98,7 +98,7 @@ static void StoreRelCheck(Relation rel, char *ccname, Node *expr,
 			  bool is_validated, bool is_local, int inhcount,
 			  bool is_no_inherit, bool is_internal);
 static void StoreConstraints(Relation rel, List *cooked_constraints,
-							 bool is_internal);
+				 bool is_internal);
 static bool MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 							bool allow_merge, bool is_local,
 							bool is_no_inherit);
@@ -246,13 +246,26 @@ heap_create(const char *relname,
 			char relkind,
 			char relpersistence,
 			bool shared_relation,
-			bool mapped_relation)
+			bool mapped_relation,
+			bool allow_system_table_mods)
 {
 	bool		create_storage;
 	Relation	rel;
 
 	/* The caller must have provided an OID for the relation. */
 	Assert(OidIsValid(relid));
+
+	/*
+	 * sanity checks
+	 */
+	if (!allow_system_table_mods &&
+		(IsSystemNamespace(relnamespace) || IsToastNamespace(relnamespace)) &&
+		IsNormalProcessingMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied to create \"%s.%s\"",
+						get_namespace_name(relnamespace), relname),
+		errdetail("System catalog modifications are currently disallowed.")));
 
 	/*
 	 * Decide if we need storage or not, and handle a couple other special
@@ -768,7 +781,6 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_reltuples - 1] = Float4GetDatum(rd_rel->reltuples);
 	values[Anum_pg_class_relallvisible - 1] = Int32GetDatum(rd_rel->relallvisible);
 	values[Anum_pg_class_reltoastrelid - 1] = ObjectIdGetDatum(rd_rel->reltoastrelid);
-	values[Anum_pg_class_reltoastidxid - 1] = ObjectIdGetDatum(rd_rel->reltoastidxid);
 	values[Anum_pg_class_relhasindex - 1] = BoolGetDatum(rd_rel->relhasindex);
 	values[Anum_pg_class_relisshared - 1] = BoolGetDatum(rd_rel->relisshared);
 	values[Anum_pg_class_relpersistence - 1] = CharGetDatum(rd_rel->relpersistence);
@@ -780,6 +792,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relhasrules - 1] = BoolGetDatum(rd_rel->relhasrules);
 	values[Anum_pg_class_relhastriggers - 1] = BoolGetDatum(rd_rel->relhastriggers);
 	values[Anum_pg_class_relhassubclass - 1] = BoolGetDatum(rd_rel->relhassubclass);
+	values[Anum_pg_class_relispopulated - 1] = BoolGetDatum(rd_rel->relispopulated);
 	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
 	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
 	if (relacl != (Datum) 0)
@@ -869,6 +882,7 @@ AddNewRelationTuple(Relation pg_class_desc,
 		 * that will do.
 		 */
 		new_rel_reltup->relfrozenxid = RecentXmin;
+
 		/*
 		 * Similarly, initialize the minimum Multixact to the first value that
 		 * could possibly be stored in tuples in the table.  Running
@@ -1130,16 +1144,16 @@ heap_create_with_catalog(const char *relname,
 							   relkind,
 							   relpersistence,
 							   shared_relation,
-							   mapped_relation);
+							   mapped_relation,
+							   allow_system_table_mods);
 
 	Assert(relid == RelationGetRelid(new_rel_desc));
 
 	/*
 	 * Decide whether to create an array type over the relation's rowtype. We
 	 * do not create any array types for system catalogs (ie, those made
-	 * during initdb).	We create array types for regular relations, views,
-	 * composite types and foreign tables ... but not, eg, for toast tables or
-	 * sequences.
+	 * during initdb). We do not create them where the use of a relation as
+	 * such is an implementation detail: toast tables, sequences and indexes.
 	 */
 	if (IsUnderPostmaster && (relkind == RELKIND_RELATION ||
 							  relkind == RELKIND_VIEW ||
@@ -1346,26 +1360,6 @@ heap_create_init_fork(Relation rel)
 }
 
 /*
- * Check whether a materialized view is in an initial, unloaded state.
- *
- * The check here must match what is set up in heap_create_init_fork().
- * Currently the init fork is an empty file.  A missing heap is also
- * considered to be unloaded.
- */
-bool
-heap_is_matview_init_state(Relation rel)
-{
-	Assert(rel->rd_rel->relkind == RELKIND_MATVIEW);
-
-	RelationOpenSmgr(rel);
-
-	if (!smgrexists(rel->rd_smgr, MAIN_FORKNUM))
-		return true;
-
-	return (smgrnblocks(rel->rd_smgr, MAIN_FORKNUM) < 1);
-}
-
-/*
  *		RelationRemoveInheritance
  *
  * Formerly, this routine checked for child relations and aborted the
@@ -1390,7 +1384,7 @@ RelationRemoveInheritance(Oid relid)
 				ObjectIdGetDatum(relid));
 
 	scan = systable_beginscan(catalogRelation, InheritsRelidSeqnoIndexId, true,
-							  SnapshotNow, 1, &key);
+							  NULL, 1, &key);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		simple_heap_delete(catalogRelation, &tuple->t_self);
@@ -1454,7 +1448,7 @@ DeleteAttributeTuples(Oid relid)
 				ObjectIdGetDatum(relid));
 
 	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
-							  SnapshotNow, 1, key);
+							  NULL, 1, key);
 
 	/* Delete all the matching tuples */
 	while ((atttup = systable_getnext(scan)) != NULL)
@@ -1495,7 +1489,7 @@ DeleteSystemAttributeTuples(Oid relid)
 				Int16GetDatum(0));
 
 	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
-							  SnapshotNow, 2, key);
+							  NULL, 2, key);
 
 	/* Delete all the matching tuples */
 	while ((atttup = systable_getnext(scan)) != NULL)
@@ -1627,7 +1621,7 @@ RemoveAttrDefault(Oid relid, AttrNumber attnum,
 				Int16GetDatum(attnum));
 
 	scan = systable_beginscan(attrdef_rel, AttrDefaultIndexId, true,
-							  SnapshotNow, 2, scankeys);
+							  NULL, 2, scankeys);
 
 	/* There should be at most one matching tuple, but we loop anyway */
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -1681,7 +1675,7 @@ RemoveAttrDefaultById(Oid attrdefId)
 				ObjectIdGetDatum(attrdefId));
 
 	scan = systable_beginscan(attrdef_rel, AttrDefaultOidIndexId, true,
-							  SnapshotNow, 1, scankeys);
+							  NULL, 1, scankeys);
 
 	tuple = systable_getnext(scan);
 	if (!HeapTupleIsValid(tuple))
@@ -1934,10 +1928,10 @@ StoreAttrDefault(Relation rel, AttrNumber attnum,
 	/*
 	 * Post creation hook for attribute defaults.
 	 *
-	 * XXX. ALTER TABLE ALTER COLUMN SET/DROP DEFAULT is implemented
-	 * with a couple of deletion/creation of the attribute's default entry,
-	 * so the callee should check existence of an older version of this
-	 * entry if it needs to distinguish.
+	 * XXX. ALTER TABLE ALTER COLUMN SET/DROP DEFAULT is implemented with a
+	 * couple of deletion/creation of the attribute's default entry, so the
+	 * callee should check existence of an older version of this entry if it
+	 * needs to distinguish.
 	 */
 	InvokeObjectPostCreateHookArg(AttrDefaultRelationId,
 								  RelationGetRelid(rel), attnum, is_internal);
@@ -2037,7 +2031,7 @@ StoreRelCheck(Relation rel, char *ccname, Node *expr,
 						  is_local,		/* conislocal */
 						  inhcount,		/* coninhcount */
 						  is_no_inherit,		/* connoinherit */
-						  is_internal);	/* internally constructed? */
+						  is_internal); /* internally constructed? */
 
 	pfree(ccbin);
 	pfree(ccsrc);
@@ -2378,7 +2372,7 @@ MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 				ObjectIdGetDatum(RelationGetNamespace(rel)));
 
 	conscan = systable_beginscan(conDesc, ConstraintNameNspIndexId, true,
-								 SnapshotNow, 2, skey);
+								 NULL, 2, skey);
 
 	while (HeapTupleIsValid(tup = systable_getnext(conscan)))
 	{
@@ -2644,7 +2638,7 @@ RemoveStatistics(Oid relid, AttrNumber attnum)
 	}
 
 	scan = systable_beginscan(pgstatistic, StatisticRelidAttnumInhIndexId, true,
-							  SnapshotNow, nkeys, key);
+							  NULL, nkeys, key);
 
 	/* we must loop even when attnum != 0, in case of inherited stats */
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -2889,7 +2883,7 @@ heap_truncate_find_FKs(List *relationIds)
 	fkeyRel = heap_open(ConstraintRelationId, AccessShareLock);
 
 	fkeyScan = systable_beginscan(fkeyRel, InvalidOid, false,
-								  SnapshotNow, 0, NULL);
+								  NULL, 0, NULL);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(fkeyScan)))
 	{

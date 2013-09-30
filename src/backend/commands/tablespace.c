@@ -400,7 +400,7 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 				Anum_pg_tablespace_spcname,
 				BTEqualStrategyNumber, F_NAMEEQ,
 				CStringGetDatum(tablespacename));
-	scandesc = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scandesc = heap_beginscan_catalog(rel, 1, entry);
 	tuple = heap_getnext(scandesc, ForwardScanDirection);
 
 	if (!HeapTupleIsValid(tuple))
@@ -831,7 +831,7 @@ RenameTableSpace(const char *oldname, const char *newname)
 				Anum_pg_tablespace_spcname,
 				BTEqualStrategyNumber, F_NAMEEQ,
 				CStringGetDatum(oldname));
-	scan = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scan = heap_beginscan_catalog(rel, 1, entry);
 	tup = heap_getnext(scan, ForwardScanDirection);
 	if (!HeapTupleIsValid(tup))
 		ereport(ERROR,
@@ -861,7 +861,7 @@ RenameTableSpace(const char *oldname, const char *newname)
 				Anum_pg_tablespace_spcname,
 				BTEqualStrategyNumber, F_NAMEEQ,
 				CStringGetDatum(newname));
-	scan = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scan = heap_beginscan_catalog(rel, 1, entry);
 	tup = heap_getnext(scan, ForwardScanDirection);
 	if (HeapTupleIsValid(tup))
 		ereport(ERROR,
@@ -910,7 +910,7 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 				Anum_pg_tablespace_spcname,
 				BTEqualStrategyNumber, F_NAMEEQ,
 				CStringGetDatum(stmt->tablespacename));
-	scandesc = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scandesc = heap_beginscan_catalog(rel, 1, entry);
 	tup = heap_getnext(scandesc, ForwardScanDirection);
 	if (!HeapTupleIsValid(tup))
 		ereport(ERROR,
@@ -977,12 +977,8 @@ check_default_tablespace(char **newval, void **extra, GucSource source)
 			!OidIsValid(get_tablespace_oid(*newval, true)))
 		{
 			/*
-			 * When source == PGC_S_TEST, we are checking the argument of an
-			 * ALTER DATABASE SET or ALTER USER SET command.  pg_dumpall dumps
-			 * all roles before tablespaces, so if we're restoring a
-			 * pg_dumpall script the tablespace might not yet exist, but will
-			 * be created later.  Because of that, issue a NOTICE if source ==
-			 * PGC_S_TEST, but accept the value anyway.
+			 * When source == PGC_S_TEST, don't throw a hard error for a
+			 * nonexistent tablespace, only a NOTICE.  See comments in guc.h.
 			 */
 			if (source == PGC_S_TEST)
 			{
@@ -1111,14 +1107,9 @@ check_temp_tablespaces(char **newval, void **extra, GucSource source)
 			}
 
 			/*
-			 * In an interactive SET command, we ereport for bad info.	When
-			 * source == PGC_S_TEST, we are checking the argument of an ALTER
-			 * DATABASE SET or ALTER USER SET command.	pg_dumpall dumps all
-			 * roles before tablespaces, so if we're restoring a pg_dumpall
-			 * script the tablespace might not yet exist, but will be created
-			 * later.  Because of that, issue a NOTICE if source ==
-			 * PGC_S_TEST, but accept the value anyway.  Otherwise, silently
-			 * ignore any bad list elements.
+			 * In an interactive SET command, we ereport for bad info.  When
+			 * source == PGC_S_TEST, don't throw a hard error for a
+			 * nonexistent tablespace, only a NOTICE.  See comments in guc.h.
 			 */
 			curoid = get_tablespace_oid(curname, source <= PGC_S_TEST);
 			if (curoid == InvalidOid)
@@ -1311,7 +1302,7 @@ get_tablespace_oid(const char *tablespacename, bool missing_ok)
 				Anum_pg_tablespace_spcname,
 				BTEqualStrategyNumber, F_NAMEEQ,
 				CStringGetDatum(tablespacename));
-	scandesc = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scandesc = heap_beginscan_catalog(rel, 1, entry);
 	tuple = heap_getnext(scandesc, ForwardScanDirection);
 
 	/* We assume that there can be at most one matching tuple */
@@ -1357,7 +1348,7 @@ get_tablespace_name(Oid spc_oid)
 				ObjectIdAttributeNumber,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(spc_oid));
-	scandesc = heap_beginscan(rel, SnapshotNow, 1, entry);
+	scandesc = heap_beginscan_catalog(rel, 1, entry);
 	tuple = heap_getnext(scandesc, ForwardScanDirection);
 
 	/* We assume that there can be at most one matching tuple */

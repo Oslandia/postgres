@@ -118,7 +118,7 @@
 		if (__builtin_constant_p(elevel) && (elevel) >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
-#else /* !HAVE__BUILTIN_CONSTANT_P */
+#else							/* !HAVE__BUILTIN_CONSTANT_P */
 #define ereport_domain(elevel, domain, rest)	\
 	do { \
 		const int elevel_ = (elevel); \
@@ -127,7 +127,7 @@
 		if (elevel_ >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
-#endif /* HAVE__BUILTIN_CONSTANT_P */
+#endif   /* HAVE__BUILTIN_CONSTANT_P */
 
 #define ereport(elevel, rest)	\
 	ereport_domain(elevel, TEXTDOMAIN, rest)
@@ -203,7 +203,7 @@ __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
  * set_errcontext_domain() first sets the domain to be used, and
  * errcontext_msg() passes the actual message.
  */
-#define errcontext	set_errcontext_domain(TEXTDOMAIN),  errcontext_msg
+#define errcontext	set_errcontext_domain(TEXTDOMAIN),	errcontext_msg
 
 extern int	set_errcontext_domain(const char *domain);
 extern int
@@ -247,7 +247,7 @@ extern int	getinternalerrposition(void);
 		if (__builtin_constant_p(elevel) && (elevel) >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
-#else /* !HAVE__BUILTIN_CONSTANT_P */
+#else							/* !HAVE__BUILTIN_CONSTANT_P */
 #define elog(elevel, ...)  \
 	do { \
 		int		elevel_; \
@@ -257,12 +257,12 @@ extern int	getinternalerrposition(void);
 		if (elevel_ >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
-#endif /* HAVE__BUILTIN_CONSTANT_P */
-#else /* !HAVE__VA_ARGS */
+#endif   /* HAVE__BUILTIN_CONSTANT_P */
+#else							/* !HAVE__VA_ARGS */
 #define elog  \
 	elog_start(__FILE__, __LINE__, PG_FUNCNAME_MACRO), \
 	elog_finish
-#endif /* HAVE__VA_ARGS */
+#endif   /* HAVE__VA_ARGS */
 
 extern void elog_start(const char *filename, int lineno, const char *funcname);
 extern void
@@ -381,7 +381,7 @@ typedef struct ErrorData
 	int			lineno;			/* __LINE__ of ereport() call */
 	const char *funcname;		/* __func__ of ereport() call */
 	const char *domain;			/* message domain */
-	const char *context_domain;	/* message domain for context message */
+	const char *context_domain; /* message domain for context message */
 	int			sqlerrcode;		/* encoded ERRSTATE */
 	char	   *message;		/* primary error message */
 	char	   *detail;			/* detail error message */
@@ -397,6 +397,9 @@ typedef struct ErrorData
 	int			internalpos;	/* cursor index into internalquery */
 	char	   *internalquery;	/* text of internally-generated query */
 	int			saved_errno;	/* errno at entry */
+
+	/* context containing associated non-constant strings */
+	struct MemoryContextData *assoc_context;
 } ErrorData;
 
 extern void EmitErrorReport(void);
@@ -405,6 +408,8 @@ extern void FreeErrorData(ErrorData *edata);
 extern void FlushErrorState(void);
 extern void ReThrowError(ErrorData *edata) __attribute__((noreturn));
 extern void pg_re_throw(void) __attribute__((noreturn));
+
+extern char *GetErrorContextStack(void);
 
 /* Hook for intercepting messages before they are sent to the server log */
 typedef void (*emit_log_hook_type) (ErrorData *edata);
@@ -423,6 +428,7 @@ typedef enum
 extern int	Log_error_verbosity;
 extern char *Log_line_prefix;
 extern int	Log_destination;
+extern char *Log_destination_string;
 
 /* Log destination bitmap */
 #define LOG_DESTINATION_STDERR	 1

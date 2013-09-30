@@ -77,7 +77,6 @@ typedef struct RelationData
 	BackendId	rd_backend;		/* owning backend id, if temporary relation */
 	bool		rd_islocaltemp; /* rel is a temp rel of this session */
 	bool		rd_isnailed;	/* rel is nailed in cache */
-	bool		rd_ispopulated;	/* matview has query results */
 	bool		rd_isvalid;		/* relcache entry is valid */
 	char		rd_indexvalid;	/* state of rd_indexlist: 0 = not valid, 1 =
 								 * valid, 2 = temporarily forced */
@@ -85,20 +84,15 @@ typedef struct RelationData
 	/*
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
 	 * survived into; or zero if the rel was not created in the current top
-	 * transaction.  This can be now be relied on, whereas previously it
-	 * could be "forgotten" in earlier releases.
-	 * Likewise, rd_newRelfilenodeSubid is the ID of the highest
-	 * subtransaction the relfilenode change has survived into, or zero if not
-	 * changed in the current transaction (or we have forgotten changing it).
-	 * rd_newRelfilenodeSubid can be forgotten when a relation has multiple
-	 * new relfilenodes within a single transaction, with one of them occuring
-	 * in a subsequently aborted subtransaction, e.g.
-	 * 		BEGIN;
-	 * 		TRUNCATE t;
-	 * 		SAVEPOINT save;
-	 * 		TRUNCATE t;
-	 * 		ROLLBACK TO save;
-	 * 		-- rd_newRelfilenode is now forgotten
+	 * transaction.  This can be now be relied on, whereas previously it could
+	 * be "forgotten" in earlier releases. Likewise, rd_newRelfilenodeSubid is
+	 * the ID of the highest subtransaction the relfilenode change has
+	 * survived into, or zero if not changed in the current transaction (or we
+	 * have forgotten changing it). rd_newRelfilenodeSubid can be forgotten
+	 * when a relation has multiple new relfilenodes within a single
+	 * transaction, with one of them occuring in a subsequently aborted
+	 * subtransaction, e.g. BEGIN; TRUNCATE t; SAVEPOINT save; TRUNCATE t;
+	 * ROLLBACK TO save; -- rd_newRelfilenode is now forgotten
 	 */
 	SubTransactionId rd_createSubid;	/* rel was created in current xact */
 	SubTransactionId rd_newRelfilenodeSubid;	/* new relfilenode assigned in
@@ -163,7 +157,7 @@ typedef struct RelationData
 	 * foreign-table support
 	 *
 	 * rd_fdwroutine must point to a single memory chunk palloc'd in
-	 * CacheMemoryContext.  It will be freed and reset to NULL on a relcache
+	 * CacheMemoryContext.	It will be freed and reset to NULL on a relcache
 	 * reset.
 	 */
 
@@ -214,6 +208,7 @@ typedef struct StdRdOptions
 	int			fillfactor;		/* page fill factor in percent (0..100) */
 	AutoVacOpts autovacuum;		/* autovacuum-related options */
 	bool		security_barrier;		/* for views */
+	int			check_option_offset;	/* for views */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -248,6 +243,39 @@ typedef struct StdRdOptions
 #define RelationIsSecurityView(relation)	\
 	((relation)->rd_options ?				\
 	 ((StdRdOptions *) (relation)->rd_options)->security_barrier : false)
+
+/*
+ * RelationHasCheckOption
+ *		Returns true if the relation is a view defined with either the local
+ *		or the cascaded check option.
+ */
+#define RelationHasCheckOption(relation)									\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0)
+
+/*
+ * RelationHasLocalCheckOption
+ *		Returns true if the relation is a view defined with the local check
+ *		option.
+ */
+#define RelationHasLocalCheckOption(relation)								\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0 ?	\
+	 strcmp((char *) (relation)->rd_options +								\
+			((StdRdOptions *) (relation)->rd_options)->check_option_offset,	\
+			"local") == 0 : false)
+
+/*
+ * RelationHasCascadedCheckOption
+ *		Returns true if the relation is a view defined with the cascaded check
+ *		option.
+ */
+#define RelationHasCascadedCheckOption(relation)							\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0 ?	\
+	 strcmp((char *) (relation)->rd_options +								\
+			((StdRdOptions *) (relation)->rd_options)->check_option_offset,	\
+			"cascaded") == 0 : false)
 
 /*
  * RelationIsValid
@@ -404,11 +432,19 @@ typedef struct StdRdOptions
 
 /*
  * RelationIsScannable
- * 		Currently can only be false for a materialized view which has not been
- * 		populated by its query.  This is likely to get more complicated later,
- * 		so use a macro which looks like a function.
+ *		Currently can only be false for a materialized view which has not been
+ *		populated by its query.  This is likely to get more complicated later,
+ *		so use a macro which looks like a function.
  */
-#define RelationIsScannable(relation) ((relation)->rd_ispopulated)
+#define RelationIsScannable(relation) ((relation)->rd_rel->relispopulated)
+
+/*
+ * RelationIsPopulated
+ *		Currently, we don't physically distinguish the "populated" and
+ *		"scannable" properties of matviews, but that may change later.
+ *		Hence, use the appropriate one of these macros in code tests.
+ */
+#define RelationIsPopulated(relation) ((relation)->rd_rel->relispopulated)
 
 
 /* routines in utils/cache/relcache.c */

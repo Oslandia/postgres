@@ -69,7 +69,7 @@
 #include "postgres.h"
 
 #ifdef _MSC_VER
-#include <float.h> /* for _isnan */
+#include <float.h>				/* for _isnan */
 #endif
 #include <math.h>
 
@@ -1587,6 +1587,14 @@ cost_windowagg(Path *path, PlannerInfo *root,
 
 		/* also add the input expressions' cost to per-input-row costs */
 		cost_qual_eval_node(&argcosts, (Node *) wfunc->args, root);
+		startup_cost += argcosts.startup;
+		wfunccost += argcosts.per_tuple;
+
+		/*
+		 * Add the filter's cost to per-input-row costs.  XXX We should reduce
+		 * input expression costs according to filter selectivity.
+		 */
+		cost_qual_eval_node(&argcosts, (Node *) wfunc->aggfilter, root);
 		startup_cost += argcosts.startup;
 		wfunccost += argcosts.per_tuple;
 
@@ -3745,7 +3753,7 @@ set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 		 * The subquery could be an expansion of a view that's had columns
 		 * added to it since the current query was parsed, so that there are
 		 * non-junk tlist columns in it that don't correspond to any column
-		 * visible at our query level.  Ignore such columns.
+		 * visible at our query level.	Ignore such columns.
 		 */
 		if (te->resno < rel->min_attr || te->resno > rel->max_attr)
 			continue;
@@ -3935,10 +3943,9 @@ set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 
 		/*
 		 * Ordinarily, a Var in a rel's reltargetlist must belong to that rel;
-		 * but there are corner cases involving LATERAL references in
-		 * appendrel members where that isn't so (see set_append_rel_size()).
-		 * If the Var has the wrong varno, fall through to the generic case
-		 * (it doesn't seem worth the trouble to be any smarter).
+		 * but there are corner cases involving LATERAL references where that
+		 * isn't so.  If the Var has the wrong varno, fall through to the
+		 * generic case (it doesn't seem worth the trouble to be any smarter).
 		 */
 		if (IsA(node, Var) &&
 			((Var *) node)->varno == rel->relid)

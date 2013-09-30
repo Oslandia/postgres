@@ -1803,11 +1803,19 @@ restart:
 				pgstat_end_function_usage(&fcusage,
 										rsinfo.isDone != ExprMultipleResult);
 			}
-			else
+			else if (fcache->func.fn_retset)
 			{
+				/* for a strict SRF, result for NULL is an empty set */
 				result = (Datum) 0;
 				*isNull = true;
 				*isDone = ExprEndResult;
+			}
+			else
+			{
+				/* for a strict non-SRF, result for NULL is a NULL */
+				result = (Datum) 0;
+				*isNull = true;
+				*isDone = ExprSingleResult;
 			}
 
 			/* Which protocol does function want to use? */
@@ -4259,16 +4267,20 @@ ExecEvalArrayCoerceExpr(ArrayCoerceExprState *astate,
 /* ----------------------------------------------------------------
  *		ExecEvalCurrentOfExpr
  *
- * The planner must convert CURRENT OF into a TidScan qualification.
- * So, we have to be able to do ExecInitExpr on a CurrentOfExpr,
- * but we shouldn't ever actually execute it.
+ * The planner should convert CURRENT OF into a TidScan qualification, or some
+ * other special handling in a ForeignScan node.  So we have to be able to do
+ * ExecInitExpr on a CurrentOfExpr, but we shouldn't ever actually execute it.
+ * If we get here, we suppose we must be dealing with CURRENT OF on a foreign
+ * table whose FDW doesn't handle it, and complain accordingly.
  * ----------------------------------------------------------------
  */
 static Datum
 ExecEvalCurrentOfExpr(ExprState *exprstate, ExprContext *econtext,
 					  bool *isNull, ExprDoneCond *isDone)
 {
-	elog(ERROR, "CURRENT OF cannot be executed");
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		   errmsg("WHERE CURRENT OF is not supported for this table type")));
 	return 0;					/* keep compiler quiet */
 }
 
@@ -4398,7 +4410,9 @@ ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 					naggs = ++aggstate->numaggs;
 
 					astate->args = (List *) ExecInitExprRec((Expr *) aggref->args,
-										parent, node);
+															parent, node);
+					astate->aggfilter = ExecInitExprRec(aggref->aggfilter,
+														parent, node);
 
 					/*
 					 * Complain if the aggregate's arguments contain any
@@ -4436,7 +4450,9 @@ ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 						winstate->numaggs++;
 
 					wfstate->args = (List *) ExecInitExprRec((Expr *) wfunc->args,
-										 parent, node);
+															 parent, node);
+					wfstate->aggfilter = ExecInitExprRec(wfunc->aggfilter,
+														 parent, node);
 
 					/*
 					 * Complain if the windowfunc's arguments contain any

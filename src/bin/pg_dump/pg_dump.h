@@ -236,14 +236,15 @@ typedef struct _tableInfo
 	char	   *relacl;
 	char		relkind;
 	char		relpersistence; /* relation persistence */
+	bool		relispopulated; /* relation is populated */
 	char	   *reltablespace;	/* relation tablespace */
 	char	   *reloptions;		/* options specified by WITH (...) */
+	char	   *checkoption;	/* WITH CHECK OPTION */
 	char	   *toast_reloptions;		/* ditto, for the TOAST table */
 	bool		hasindex;		/* does it have any indexes? */
 	bool		hasrules;		/* does it have any rules? */
 	bool		hastriggers;	/* does it have any triggers? */
 	bool		hasoids;		/* does it have OIDs? */
-	bool		isscannable;	/* is valid for use in queries */
 	uint32		frozenxid;		/* for restore frozen xid */
 	Oid			toast_oid;		/* for restore toast frozen xid */
 	uint32		toast_frozenxid;	/* for restore toast frozen xid */

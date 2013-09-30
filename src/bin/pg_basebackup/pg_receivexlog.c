@@ -83,10 +83,12 @@ stop_streaming(XLogRecPtr xlogpos, uint32 timeline, bool segment_finished)
 				timeline);
 
 	/*
-	 * Note that we report the previous, not current, position here. That's
-	 * the exact location where the timeline switch happend. After the switch,
-	 * we restart streaming from the beginning of the segment, so xlogpos can
-	 * smaller than prevpos if we just switched to new timeline.
+	 * Note that we report the previous, not current, position here. After a
+	 * timeline switch, xlogpos points to the beginning of the segment because
+	 * that's where we always begin streaming. Reporting the end of previous
+	 * timeline isn't totally accurate, because the next timeline can begin
+	 * slightly before the end of the WAL that we received on the previous
+	 * timeline, but it's close enough for reporting purposes.
 	 */
 	if (prevtimeline != 0 && prevtimeline != timeline)
 		fprintf(stderr, _("%s: switched to timeline %u at %X/%X\n"),
@@ -119,6 +121,7 @@ FindStreamingStart(uint32 *tli)
 	struct dirent *dirent;
 	XLogSegNo	high_segno = 0;
 	uint32		high_tli = 0;
+	bool		high_ispartial = false;
 
 	dir = opendir(basedir);
 	if (dir == NULL)
@@ -130,20 +133,32 @@ FindStreamingStart(uint32 *tli)
 
 	while ((dirent = readdir(dir)) != NULL)
 	{
-		char		fullpath[MAXPGPATH];
-		struct stat statbuf;
 		uint32		tli;
 		unsigned int log,
 					seg;
 		XLogSegNo	segno;
+		bool		ispartial;
 
 		/*
 		 * Check if the filename looks like an xlog file, or a .partial file.
 		 * Xlog files are always 24 characters, and .partial files are 32
 		 * characters.
 		 */
-		if (strlen(dirent->d_name) != 24 ||
-			!strspn(dirent->d_name, "0123456789ABCDEF") == 24)
+		if (strlen(dirent->d_name) == 24)
+		{
+			if (strspn(dirent->d_name, "0123456789ABCDEF") != 24)
+				continue;
+			ispartial = false;
+		}
+		else if (strlen(dirent->d_name) == 32)
+		{
+			if (strspn(dirent->d_name, "0123456789ABCDEF") != 24)
+				continue;
+			if (strcmp(&dirent->d_name[24], ".partial") != 0)
+				continue;
+			ispartial = true;
+		}
+		else
 			continue;
 
 		/*
@@ -158,31 +173,40 @@ FindStreamingStart(uint32 *tli)
 		}
 		segno = ((uint64) log) << 32 | seg;
 
-		/* Check if this is a completed segment or not */
-		snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
-		if (stat(fullpath, &statbuf) != 0)
+		/*
+		 * Check that the segment has the right size, if it's supposed to be
+		 * completed.
+		 */
+		if (!ispartial)
 		{
-			fprintf(stderr, _("%s: could not stat file \"%s\": %s\n"),
-					progname, fullpath, strerror(errno));
-			disconnect_and_exit(1);
-		}
+			struct stat statbuf;
+			char		fullpath[MAXPGPATH];
 
-		if (statbuf.st_size == XLOG_SEG_SIZE)
-		{
-			/* Completed segment */
-			if (segno > high_segno || (segno == high_segno && tli > high_tli))
+			snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
+			if (stat(fullpath, &statbuf) != 0)
 			{
-				high_segno = segno;
-				high_tli = tli;
+				fprintf(stderr, _("%s: could not stat file \"%s\": %s\n"),
+						progname, fullpath, strerror(errno));
+				disconnect_and_exit(1);
+			}
+
+			if (statbuf.st_size != XLOG_SEG_SIZE)
+			{
+				fprintf(stderr,
+						_("%s: segment file \"%s\" has incorrect size %d, skipping\n"),
+						progname, dirent->d_name, (int) statbuf.st_size);
 				continue;
 			}
 		}
-		else
+
+		/* Looks like a valid segment. Remember that we saw it. */
+		if ((segno > high_segno) ||
+			(segno == high_segno && tli > high_tli) ||
+			(segno == high_segno && tli == high_tli && high_ispartial && !ispartial))
 		{
-			fprintf(stderr,
-			  _("%s: segment file \"%s\" has incorrect size %d, skipping\n"),
-					progname, dirent->d_name, (int) statbuf.st_size);
-			continue;
+			high_segno = segno;
+			high_tli = tli;
+			high_ispartial = ispartial;
 		}
 	}
 
@@ -193,10 +217,12 @@ FindStreamingStart(uint32 *tli)
 		XLogRecPtr	high_ptr;
 
 		/*
-		 * Move the starting pointer to the start of the next segment, since
-		 * the highest one we've seen was completed.
+		 * Move the starting pointer to the start of the next segment, if
+		 * the highest one we saw was completed. Otherwise start streaming
+		 * from the beginning of the .partial segment.
 		 */
-		high_segno++;
+		if (!high_ispartial)
+			high_segno++;
 
 		XLogSegNoOffsetToRecPtr(high_segno, 0, high_ptr);
 
@@ -456,7 +482,7 @@ main(int argc, char **argv)
 		else
 		{
 			fprintf(stderr,
-					/* translator: check source for value for %d */
+			/* translator: check source for value for %d */
 					_("%s: disconnected; waiting %d seconds to try again\n"),
 					progname, RECONNECT_SLEEP_TIME);
 			pg_usleep(RECONNECT_SLEEP_TIME * 1000000);

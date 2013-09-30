@@ -192,6 +192,7 @@ main(int argc, char *argv[])
 					fprintf(stderr, _("%s: multitransaction ID (-m) must not be 0\n"), progname);
 					exit(1);
 				}
+
 				/*
 				 * XXX It'd be nice to have more sanity checks here, e.g. so
 				 * that oldest is not wrapped around w.r.t. nextMulti.
@@ -517,6 +518,7 @@ GuessControlValues(void)
 
 	ControlFile.wal_level = WAL_LEVEL_MINIMAL;
 	ControlFile.MaxConnections = 100;
+	ControlFile.max_worker_processes = 8;
 	ControlFile.max_prepared_xacts = 0;
 	ControlFile.max_locks_per_xact = 64;
 
@@ -624,8 +626,8 @@ PrintControlValues(bool guessed)
 		   (ControlFile.float4ByVal ? _("by value") : _("by reference")));
 	printf(_("Float8 argument passing:              %s\n"),
 		   (ControlFile.float8ByVal ? _("by value") : _("by reference")));
-	printf(_("Data page checksums:                  %s\n"),
-		   (ControlFile.data_checksums ? _("enabled") : _("disabled")));
+	printf(_("Data page checksum version:           %u\n"),
+		   ControlFile.data_checksum_version);
 }
 
 
@@ -663,6 +665,7 @@ RewriteControlFile(void)
 	 */
 	ControlFile.wal_level = WAL_LEVEL_MINIMAL;
 	ControlFile.MaxConnections = 100;
+	ControlFile.max_worker_processes = 8;
 	ControlFile.max_prepared_xacts = 0;
 	ControlFile.max_locks_per_xact = 64;
 
@@ -1035,7 +1038,7 @@ usage(void)
 	printf(_("  -e XIDEPOCH      set next transaction ID epoch\n"));
 	printf(_("  -f               force update to be done\n"));
 	printf(_("  -l XLOGFILE      force minimum WAL starting location for new transaction log\n"));
-	printf(_("  -m XID,OLDEST    set next multitransaction ID and oldest value\n"));
+	printf(_("  -m MXID,MXID     set next and oldest multitransaction ID\n"));
 	printf(_("  -n               no update, just show extracted control values (for testing)\n"));
 	printf(_("  -o OID           set next OID\n"));
 	printf(_("  -O OFFSET        set next multitransaction offset\n"));

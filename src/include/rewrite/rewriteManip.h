@@ -35,7 +35,7 @@ typedef enum ReplaceVarsNoMatchOption
 {
 	REPLACEVARS_REPORT_ERROR,	/* throw error if no match */
 	REPLACEVARS_CHANGE_VARNO,	/* change the Var's varno, nothing else */
-	REPLACEVARS_SUBSTITUTE_NULL	/* replace with a NULL Const */
+	REPLACEVARS_SUBSTITUTE_NULL /* replace with a NULL Const */
 } ReplaceVarsNoMatchOption;
 
 
@@ -49,8 +49,6 @@ extern void IncrementVarSublevelsUp_rtable(List *rtable,
 
 extern bool rangeTableEntry_used(Node *node, int rt_index,
 					 int sublevels_up);
-extern bool attribute_used(Node *node, int rt_index, int attno,
-			   int sublevels_up);
 
 extern Query *getInsertSelectQuery(Query *parsetree, Query ***subquery_ptr);
 

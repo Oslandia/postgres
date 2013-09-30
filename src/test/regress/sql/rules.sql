@@ -872,7 +872,7 @@ create rule "_RETURN" as on select to fooview do instead
 select * from fooview;
 select xmin, * from fooview;  -- fail, views don't have such a column
 
-select reltoastrelid, reltoastidxid, relkind, relfrozenxid
+select reltoastrelid, relkind, relfrozenxid
   from pg_class where oid = 'fooview'::regclass;
 
 drop view fooview;
@@ -970,6 +970,7 @@ create rule r2 as on update to rules_src do also
 update rules_src set f2 = f2 / 10;
 select * from rules_src;
 select * from rules_log;
+create rule r3 as on delete to rules_src do notify rules_src_deletion;
 \d+ rules_src
 
 --

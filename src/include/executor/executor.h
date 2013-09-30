@@ -191,6 +191,8 @@ extern ResultRelInfo *ExecGetTriggerResultRel(EState *estate, Oid relid);
 extern bool ExecContextForcesOids(PlanState *planstate, bool *hasoids);
 extern void ExecConstraints(ResultRelInfo *resultRelInfo,
 				TupleTableSlot *slot, EState *estate);
+extern void ExecWithCheckOptions(ResultRelInfo *resultRelInfo,
+					 TupleTableSlot *slot, EState *estate);
 extern ExecRowMark *ExecFindRowMark(EState *estate, Index rti);
 extern ExecAuxRowMark *ExecBuildAuxRowMark(ExecRowMark *erm, List *targetlist);
 extern TupleTableSlot *EvalPlanQual(EState *estate, EPQState *epqstate,
@@ -341,7 +343,7 @@ extern void ExecAssignScanTypeFromOuterPlan(ScanState *scanstate);
 
 extern bool ExecRelationIsTargetRelation(EState *estate, Index scanrelid);
 
-extern Relation ExecOpenScanRelation(EState *estate, Index scanrelid);
+extern Relation ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags);
 extern void ExecCloseScanRelation(Relation scanrel);
 
 extern void ExecOpenIndices(ResultRelInfo *resultRelInfo);

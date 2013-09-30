@@ -260,6 +260,8 @@ main(int argc, char *argv[])
 		   wal_level_str(ControlFile.wal_level));
 	printf(_("Current max_connections setting:      %d\n"),
 		   ControlFile.MaxConnections);
+	printf(_("Current max_worker_processes setting: %d\n"),
+		   ControlFile.max_worker_processes);
 	printf(_("Current max_prepared_xacts setting:   %d\n"),
 		   ControlFile.max_prepared_xacts);
 	printf(_("Current max_locks_per_xact setting:   %d\n"),
@@ -287,7 +289,7 @@ main(int argc, char *argv[])
 		   (ControlFile.float4ByVal ? _("by value") : _("by reference")));
 	printf(_("Float8 argument passing:              %s\n"),
 		   (ControlFile.float8ByVal ? _("by value") : _("by reference")));
-	printf(_("Data page checksums:                  %s\n"),
-		   (ControlFile.data_checksums ? _("enabled") : _("disabled")));
+	printf(_("Data page checksum version:           %u\n"),
+		   ControlFile.data_checksum_version);
 	return 0;
 }

@@ -54,6 +54,7 @@
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/cost.h"
 #include "optimizer/planmain.h"
 #include "optimizer/prep.h"
 #include "parser/analyze.h"
@@ -67,6 +68,14 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
+
+/*
+ * We must skip "overhead" operations that involve database access when the
+ * cached plan's subject statement is a transaction control command.
+ */
+#define IsTransactionStmtPlan(plansource)  \
+	((plansource)->raw_parse_tree && \
+	 IsA((plansource)->raw_parse_tree, TransactionStmt))
 
 /*
  * This is the head of the backend's list of "saved" CachedPlanSources (i.e.,
@@ -83,7 +92,7 @@ static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 				ParamListInfo boundParams);
 static bool choose_custom_plan(CachedPlanSource *plansource,
 				   ParamListInfo boundParams);
-static double cached_plan_cost(CachedPlan *plan);
+static double cached_plan_cost(CachedPlan *plan, bool include_planner);
 static void AcquireExecutorLocks(List *stmt_list, bool acquire);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
@@ -208,7 +217,7 @@ CreateCachedPlan(Node *raw_parse_tree,
  * in that context.
  *
  * A one-shot plan cannot be saved or copied, since we make no effort to
- * preserve the raw parse tree unmodified.  There is also no support for
+ * preserve the raw parse tree unmodified.	There is also no support for
  * invalidation, so plan use must be completed in the current transaction,
  * and DDL that might invalidate the querytree_list must be avoided as well.
  *
@@ -352,23 +361,27 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 	plansource->query_context = querytree_context;
 	plansource->query_list = querytree_list;
 
-	/*
-	 * Use the planner machinery to extract dependencies.  Data is saved in
-	 * query_context.  (We assume that not a lot of extra cruft is created by
-	 * this call.)  We can skip this for one-shot plans.
-	 */
-	if (!plansource->is_oneshot)
+	if (!plansource->is_oneshot && !IsTransactionStmtPlan(plansource))
+	{
+		/*
+		 * Use the planner machinery to extract dependencies.  Data is saved
+		 * in query_context.  (We assume that not a lot of extra cruft is
+		 * created by this call.)  We can skip this for one-shot plans, and
+		 * transaction control commands have no such dependencies anyway.
+		 */
 		extract_query_dependencies((Node *) querytree_list,
 								   &plansource->relationOids,
 								   &plansource->invalItems);
 
-	/*
-	 * Also save the current search_path in the query_context.  (This should
-	 * not generate much extra cruft either, since almost certainly the path
-	 * is already valid.)  Again, don't really need it for one-shot plans.
-	 */
-	if (!plansource->is_oneshot)
+		/*
+		 * Also save the current search_path in the query_context.	(This
+		 * should not generate much extra cruft either, since almost certainly
+		 * the path is already valid.)	Again, we don't really need this for
+		 * one-shot plans; and we *must* skip this for transaction control
+		 * commands, because this could result in catalog accesses.
+		 */
 		plansource->search_path = GetOverrideSearchPath(querytree_context);
+	}
 
 	/*
 	 * Save the final parameter types (or other parameter specification data)
@@ -542,9 +555,11 @@ RevalidateCachedQuery(CachedPlanSource *plansource)
 	/*
 	 * For one-shot plans, we do not support revalidation checking; it's
 	 * assumed the query is parsed, planned, and executed in one transaction,
-	 * so that no lock re-acquisition is necessary.
+	 * so that no lock re-acquisition is necessary.  Also, there is never any
+	 * need to revalidate plans for transaction control commands (and we
+	 * mustn't risk any catalog accesses when handling those).
 	 */
-	if (plansource->is_oneshot)
+	if (plansource->is_oneshot || IsTransactionStmtPlan(plansource))
 	{
 		Assert(plansource->is_valid);
 		return NIL;
@@ -711,7 +726,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource)
 							   &plansource->invalItems);
 
 	/*
-	 * Also save the current search_path in the query_context.  (This should
+	 * Also save the current search_path in the query_context.	(This should
 	 * not generate much extra cruft either, since almost certainly the path
 	 * is already valid.)
 	 */
@@ -967,6 +982,9 @@ choose_custom_plan(CachedPlanSource *plansource, ParamListInfo boundParams)
 	/* Otherwise, never any point in a custom plan if there's no parameters */
 	if (boundParams == NULL)
 		return false;
+	/* ... nor for transaction control statements */
+	if (IsTransactionStmtPlan(plansource))
+		return false;
 
 	/* See if caller wants to force the decision */
 	if (plansource->cursor_options & CURSOR_OPT_GENERIC_PLAN)
@@ -981,15 +999,16 @@ choose_custom_plan(CachedPlanSource *plansource, ParamListInfo boundParams)
 	avg_custom_cost = plansource->total_custom_cost / plansource->num_custom_plans;
 
 	/*
-	 * Prefer generic plan if it's less than 10% more expensive than average
-	 * custom plan.  This threshold is a bit arbitrary; it'd be better if we
-	 * had some means of comparing planning time to the estimated runtime cost
-	 * differential.
+	 * Prefer generic plan if it's less expensive than the average custom
+	 * plan.  (Because we include a charge for cost of planning in the
+	 * custom-plan costs, this means the generic plan only has to be less
+	 * expensive than the execution cost plus replan cost of the custom
+	 * plans.)
 	 *
 	 * Note that if generic_cost is -1 (indicating we've not yet determined
 	 * the generic plan cost), we'll always prefer generic at this point.
 	 */
-	if (plansource->generic_cost < avg_custom_cost * 1.1)
+	if (plansource->generic_cost < avg_custom_cost)
 		return false;
 
 	return true;
@@ -997,9 +1016,13 @@ choose_custom_plan(CachedPlanSource *plansource, ParamListInfo boundParams)
 
 /*
  * cached_plan_cost: calculate estimated cost of a plan
+ *
+ * If include_planner is true, also include the estimated cost of constructing
+ * the plan.  (We must factor that into the cost of using a custom plan, but
+ * we don't count it for a generic plan.)
  */
 static double
-cached_plan_cost(CachedPlan *plan)
+cached_plan_cost(CachedPlan *plan, bool include_planner)
 {
 	double		result = 0;
 	ListCell   *lc;
@@ -1012,6 +1035,34 @@ cached_plan_cost(CachedPlan *plan)
 			continue;			/* Ignore utility statements */
 
 		result += plannedstmt->planTree->total_cost;
+
+		if (include_planner)
+		{
+			/*
+			 * Currently we use a very crude estimate of planning effort based
+			 * on the number of relations in the finished plan's rangetable.
+			 * Join planning effort actually scales much worse than linearly
+			 * in the number of relations --- but only until the join collapse
+			 * limits kick in.	Also, while inheritance child relations surely
+			 * add to planning effort, they don't make the join situation
+			 * worse.  So the actual shape of the planning cost curve versus
+			 * number of relations isn't all that obvious.  It will take
+			 * considerable work to arrive at a less crude estimate, and for
+			 * now it's not clear that's worth doing.
+			 *
+			 * The other big difficulty here is that we don't have any very
+			 * good model of how planning cost compares to execution costs.
+			 * The current multiplier of 1000 * cpu_operator_cost is probably
+			 * on the low side, but we'll try this for awhile before making a
+			 * more aggressive correction.
+			 *
+			 * If we ever do write a more complicated estimator, it should
+			 * probably live in src/backend/optimizer/ not here.
+			 */
+			int			nrelations = list_length(plannedstmt->rtable);
+
+			result += 1000.0 * cpu_operator_cost * (nrelations + 1);
+		}
 	}
 
 	return result;
@@ -1087,7 +1138,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 								MemoryContextGetParent(plansource->context));
 			}
 			/* Update generic_cost whenever we make a new generic plan */
-			plansource->generic_cost = cached_plan_cost(plan);
+			plansource->generic_cost = cached_plan_cost(plan, false);
 
 			/*
 			 * If, based on the now-known value of generic_cost, we'd not have
@@ -1116,7 +1167,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 		/* Accumulate total costs of custom plans, but 'ware overflow */
 		if (plansource->num_custom_plans < INT_MAX)
 		{
-			plansource->total_custom_cost += cached_plan_cost(plan);
+			plansource->total_custom_cost += cached_plan_cost(plan, true);
 			plansource->num_custom_plans++;
 		}
 	}
@@ -1622,6 +1673,10 @@ PlanCacheRelCallback(Datum arg, Oid relid)
 		if (!plansource->is_valid)
 			continue;
 
+		/* Never invalidate transaction control commands */
+		if (IsTransactionStmtPlan(plansource))
+			continue;
+
 		/*
 		 * Check the dependency list for the rewritten querytree.
 		 */
@@ -1684,6 +1739,10 @@ PlanCacheFuncCallback(Datum arg, int cacheid, uint32 hashvalue)
 
 		/* No work if it's already invalidated */
 		if (!plansource->is_valid)
+			continue;
+
+		/* Never invalidate transaction control commands */
+		if (IsTransactionStmtPlan(plansource))
 			continue;
 
 		/*
@@ -1775,6 +1834,11 @@ ResetPlanCache(void)
 		 * We *must not* mark transaction control statements as invalid,
 		 * particularly not ROLLBACK, because they may need to be executed in
 		 * aborted transactions when we can't revalidate them (cf bug #5269).
+		 */
+		if (IsTransactionStmtPlan(plansource))
+			continue;
+
+		/*
 		 * In general there is no point in invalidating utility statements
 		 * since they have no plans anyway.  So invalidate it only if it
 		 * contains at least one non-utility statement, or contains a utility

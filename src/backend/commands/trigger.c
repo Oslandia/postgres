@@ -447,7 +447,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 											  true,		/* islocal */
 											  0,		/* inhcount */
 											  true,		/* isnoinherit */
-											  isInternal);	/* is_internal */
+											  isInternal);		/* is_internal */
 	}
 
 	/*
@@ -492,7 +492,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 					BTEqualStrategyNumber, F_OIDEQ,
 					ObjectIdGetDatum(RelationGetRelid(rel)));
 		tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-									SnapshotNow, 1, &key);
+									NULL, 1, &key);
 		while (HeapTupleIsValid(tuple = systable_getnext(tgscan)))
 		{
 			Form_pg_trigger pg_trigger = (Form_pg_trigger) GETSTRUCT(tuple);
@@ -1014,7 +1014,8 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		/* ... and execute it */
 		ProcessUtility((Node *) atstmt,
 					   "(generated ALTER TABLE ADD FOREIGN KEY command)",
-					   NULL, None_Receiver, NULL, PROCESS_UTILITY_GENERATED);
+					   PROCESS_UTILITY_SUBCOMMAND, NULL,
+					   None_Receiver, NULL);
 
 		/* Remove the matched item from the list */
 		info_list = list_delete_ptr(info_list, info);
@@ -1047,7 +1048,7 @@ RemoveTriggerById(Oid trigOid)
 				ObjectIdGetDatum(trigOid));
 
 	tgscan = systable_beginscan(tgrel, TriggerOidIndexId, true,
-								SnapshotNow, 1, skey);
+								NULL, 1, skey);
 
 	tup = systable_getnext(tgscan);
 	if (!HeapTupleIsValid(tup))
@@ -1126,7 +1127,7 @@ get_trigger_oid(Oid relid, const char *trigname, bool missing_ok)
 				CStringGetDatum(trigname));
 
 	tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-								SnapshotNow, 2, skey);
+								NULL, 2, skey);
 
 	tup = systable_getnext(tgscan);
 
@@ -1241,7 +1242,7 @@ renametrig(RenameStmt *stmt)
 				BTEqualStrategyNumber, F_NAMEEQ,
 				PointerGetDatum(stmt->newname));
 	tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-								SnapshotNow, 2, key);
+								NULL, 2, key);
 	if (HeapTupleIsValid(tuple = systable_getnext(tgscan)))
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
@@ -1261,10 +1262,11 @@ renametrig(RenameStmt *stmt)
 				BTEqualStrategyNumber, F_NAMEEQ,
 				PointerGetDatum(stmt->subname));
 	tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-								SnapshotNow, 2, key);
+								NULL, 2, key);
 	if (HeapTupleIsValid(tuple = systable_getnext(tgscan)))
 	{
 		tgoid = HeapTupleGetOid(tuple);
+
 		/*
 		 * Update pg_trigger tuple with new tgname.
 		 */
@@ -1357,7 +1359,7 @@ EnableDisableTrigger(Relation rel, const char *tgname,
 		nkeys = 1;
 
 	tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-								SnapshotNow, nkeys, keys);
+								NULL, nkeys, keys);
 
 	found = changed = false;
 
@@ -1466,7 +1468,7 @@ RelationBuildTriggers(Relation relation)
 
 	tgrel = heap_open(TriggerRelationId, AccessShareLock);
 	tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true,
-								SnapshotNow, 1, &skey);
+								NULL, 1, &skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(tgscan)))
 	{
@@ -2208,8 +2210,11 @@ ExecARDeleteTriggers(EState *estate, ResultRelInfo *relinfo,
 
 	if (trigdesc && trigdesc->trig_delete_after_row)
 	{
-		HeapTuple	trigtuple = GetTupleForTrigger(estate, NULL, relinfo,
-												   tupleid, LockTupleExclusive,
+		HeapTuple	trigtuple = GetTupleForTrigger(estate,
+												   NULL,
+												   relinfo,
+												   tupleid,
+												   LockTupleExclusive,
 												   NULL);
 
 		AfterTriggerSaveEvent(estate, relinfo, TRIGGER_EVENT_DELETE,
@@ -2447,8 +2452,11 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 
 	if (trigdesc && trigdesc->trig_update_after_row)
 	{
-		HeapTuple	trigtuple = GetTupleForTrigger(estate, NULL, relinfo,
-												   tupleid, LockTupleExclusive,
+		HeapTuple	trigtuple = GetTupleForTrigger(estate,
+												   NULL,
+												   relinfo,
+												   tupleid,
+												   LockTupleExclusive,
 												   NULL);
 
 		AfterTriggerSaveEvent(estate, relinfo, TRIGGER_EVENT_UPDATE,
@@ -2613,11 +2621,12 @@ ltrmark:;
 		tuple.t_self = *tid;
 		test = heap_lock_tuple(relation, &tuple,
 							   estate->es_output_cid,
-							   lockmode, false /* wait */,
+							   lockmode, false /* wait */ ,
 							   false, &buffer, &hufd);
 		switch (test)
 		{
 			case HeapTupleSelfUpdated:
+
 				/*
 				 * The target tuple was already updated or deleted by the
 				 * current command, or by a later command in the current
@@ -4261,7 +4270,7 @@ AfterTriggerSetState(ConstraintsSetStmt *stmt)
 							ObjectIdGetDatum(namespaceId));
 
 				conscan = systable_beginscan(conrel, ConstraintNameNspIndexId,
-											 true, SnapshotNow, 2, skey);
+											 true, NULL, 2, skey);
 
 				while (HeapTupleIsValid(tup = systable_getnext(conscan)))
 				{
@@ -4324,7 +4333,7 @@ AfterTriggerSetState(ConstraintsSetStmt *stmt)
 						ObjectIdGetDatum(conoid));
 
 			tgscan = systable_beginscan(tgrel, TriggerConstraintIndexId, true,
-										SnapshotNow, 1, &skey);
+										NULL, 1, &skey);
 
 			while (HeapTupleIsValid(htup = systable_getnext(tgscan)))
 			{

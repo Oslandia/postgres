@@ -52,8 +52,8 @@ typedef struct
 } PLTemplate;
 
 static Oid create_proc_lang(const char *languageName, bool replace,
-							Oid languageOwner, Oid handlerOid, Oid inlineOid,
-							Oid valOid, bool trusted);
+				 Oid languageOwner, Oid handlerOid, Oid inlineOid,
+				 Oid valOid, bool trusted);
 static PLTemplate *find_language_template(const char *languageName);
 
 /* ---------------------------------------------------------------------
@@ -455,7 +455,7 @@ find_language_template(const char *languageName)
 				BTEqualStrategyNumber, F_NAMEEQ,
 				NameGetDatum(languageName));
 	scan = systable_beginscan(rel, PLTemplateNameIndexId, true,
-							  SnapshotNow, 1, &key);
+							  NULL, 1, &key);
 
 	tup = systable_getnext(scan);
 	if (HeapTupleIsValid(tup))

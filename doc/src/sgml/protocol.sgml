@@ -1031,8 +1031,13 @@
     goes into copy-in mode, and the server may not send any more CopyData
     messages. After both sides have sent a CopyDone message, the copy mode
     is terminated, and the backend reverts to the command-processing mode.
-    See <xref linkend="protocol-replication"> for more information on the
-    subprotocol transmitted over copy-both mode.
+    In the event of a backend-detected error during copy-both mode,
+    the backend will issue an ErrorResponse message, discard frontend messages
+    until a Sync message is received, and then issue ReadyForQuery and return
+    to normal processing.  The frontend should treat receipt of ErrorResponse
+    as terminating the copy in both directions; no CopyDone should be sent
+    in this case.  See <xref linkend="protocol-replication"> for more
+    information on the subprotocol transmitted over copy-both mode.
    </para>
 
    <para>
@@ -1418,10 +1423,15 @@ The commands accepted in walsender mode are:
      <para>
       After streaming all the WAL on a timeline that is not the latest one,
       the server will end streaming by exiting the COPY mode. When the client
-      acknowledges this by also exiting COPY mode, the server sends a
-      single-row, single-column result set indicating the next timeline in
-      this server's history. That is followed by a CommandComplete message,
-      and the server is ready to accept a new command.
+      acknowledges this by also exiting COPY mode, the server sends a result
+      set with one row and two columns, indicating the next timeline in this
+      server's history. The first column is the next timeline's ID, and the
+      second column is the XLOG position where the switch happened. Usually,
+      the switch position is the end of the WAL that was streamed, but there
+      are corner cases where the server can send some WAL from the old
+      timeline that it has not itself replayed before promoting. Finally, the
+      server sends CommandComplete message, and is ready to accept a new
+      command.
      </para>
 
      <para>
@@ -4778,8 +4788,8 @@ message.
 <listitem>
 <para>
         Table name: if the error was associated with a specific table, the
-        name of the table.  (When this field is present, the schema name field
-        provides the name of the table's schema.)
+        name of the table.  (Refer to the schema name field for the name of
+        the table's schema.)
 </para>
 </listitem>
 </varlistentry>
@@ -4791,8 +4801,8 @@ message.
 <listitem>
 <para>
         Column name: if the error was associated with a specific table column,
-        the name of the column.  (When this field is present, the schema and
-        table name fields identify the table.)
+        the name of the column.  (Refer to the schema and table name fields to
+        identify the table.)
 </para>
 </listitem>
 </varlistentry>
@@ -4803,9 +4813,9 @@ message.
 </term>
 <listitem>
 <para>
-        Datatype name: if the error was associated with a specific datatype,
-        the name of the datatype.  (When this field is present, the schema
-        name field provides the name of the datatype's schema.)
+        Data type name: if the error was associated with a specific data type,
+        the name of the data type.  (Refer to the schema name field for the
+        name of the data type's schema.)
 </para>
 </listitem>
 </varlistentry>
@@ -4817,10 +4827,10 @@ message.
 <listitem>
 <para>
         Constraint name: if the error was associated with a specific
-        constraint, the name of the constraint.  The table or domain that the
-        constraint belongs to is reported using the fields listed above.  (For
-        this purpose, indexes are treated as constraints, even if they weren't
-        created with constraint syntax.)
+        constraint, the name of the constraint.  Refer to fields listed above
+        for the associated table or domain.  (For this purpose, indexes are
+        treated as constraints, even if they weren't created with constraint
+        syntax.)
 </para>
 </listitem>
 </varlistentry>
@@ -4864,9 +4874,14 @@ message.
 
 <note>
  <para>
-  The fields for schema name, table name, column name, datatype name, and
+  The fields for schema name, table name, column name, data type name, and
   constraint name are supplied only for a limited number of error types;
-  see <xref linkend="errcodes-appendix">.
+  see <xref linkend="errcodes-appendix">.  Frontends should not assume that
+  the presence of any of these fields guarantees the presence of another
+  field.  Core error sources observe the interrelationships noted above, but
+  user-defined functions may use these fields in other ways.  In the same
+  vein, clients should not assume that these fields denote contemporary
+  objects in the current database.
  </para>
 </note>
 

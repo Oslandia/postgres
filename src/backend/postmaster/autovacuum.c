@@ -163,7 +163,7 @@ typedef struct avw_dbase
 	Oid			adw_datid;
 	char	   *adw_name;
 	TransactionId adw_frozenxid;
-	MultiXactId	adw_frozenmulti;
+	MultiXactId adw_minmulti;
 	PgStat_StatDBEntry *adw_entry;
 } avw_dbase;
 
@@ -220,7 +220,7 @@ typedef struct WorkerInfoData
 	int			wi_cost_delay;
 	int			wi_cost_limit;
 	int			wi_cost_limit_base;
-}	WorkerInfoData;
+} WorkerInfoData;
 
 typedef struct WorkerInfoData *WorkerInfo;
 
@@ -880,7 +880,7 @@ rebuild_database_list(Oid newdb)
 	int			score;
 	int			nelems;
 	HTAB	   *dbhash;
-	dlist_iter  iter;
+	dlist_iter	iter;
 
 	/* use fresh stats */
 	autovac_refresh_stats();
@@ -949,8 +949,8 @@ rebuild_database_list(Oid newdb)
 		PgStat_StatDBEntry *entry;
 
 		/*
-		 * skip databases with no stat entries -- in particular, this gets
-		 * rid of dropped databases
+		 * skip databases with no stat entries -- in particular, this gets rid
+		 * of dropped databases
 		 */
 		entry = pgstat_fetch_stat_dbentry(avdb->adl_datid);
 		if (entry == NULL)
@@ -1162,7 +1162,7 @@ do_start_worker(void)
 	foreach(cell, dblist)
 	{
 		avw_dbase  *tmp = lfirst(cell);
-		dlist_iter iter;
+		dlist_iter	iter;
 
 		/* Check to see if this one is at risk of wraparound */
 		if (TransactionIdPrecedes(tmp->adw_frozenxid, xidForceLimit))
@@ -1176,11 +1176,10 @@ do_start_worker(void)
 		}
 		else if (for_xid_wrap)
 			continue;			/* ignore not-at-risk DBs */
-		else if (MultiXactIdPrecedes(tmp->adw_frozenmulti, multiForceLimit))
+		else if (MultiXactIdPrecedes(tmp->adw_minmulti, multiForceLimit))
 		{
 			if (avdb == NULL ||
-				MultiXactIdPrecedes(tmp->adw_frozenmulti,
-									avdb->adw_frozenmulti))
+				MultiXactIdPrecedes(tmp->adw_minmulti, avdb->adw_minmulti))
 				avdb = tmp;
 			for_multi_wrap = true;
 			continue;
@@ -1296,12 +1295,12 @@ static void
 launch_worker(TimestampTz now)
 {
 	Oid			dbid;
-	dlist_iter  iter;
+	dlist_iter	iter;
 
 	dbid = do_start_worker();
 	if (OidIsValid(dbid))
 	{
-		bool found = false;
+		bool		found = false;
 
 		/*
 		 * Walk the database list and update the corresponding entry.  If the
@@ -1776,7 +1775,7 @@ autovac_balance_cost(void)
 	cost_total = 0.0;
 	dlist_foreach(iter, &AutoVacuumShmem->av_runningWorkers)
 	{
-		WorkerInfo worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
+		WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
 
 		if (worker->wi_proc != NULL &&
 			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
@@ -1794,7 +1793,7 @@ autovac_balance_cost(void)
 	cost_avail = (double) vac_cost_limit / vac_cost_delay;
 	dlist_foreach(iter, &AutoVacuumShmem->av_runningWorkers)
 	{
-		WorkerInfo worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
+		WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
 
 		if (worker->wi_proc != NULL &&
 			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
@@ -1855,7 +1854,7 @@ get_database_list(void)
 	(void) GetTransactionSnapshot();
 
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
-	scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+	scan = heap_beginscan_catalog(rel, 0, NULL);
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -1876,7 +1875,7 @@ get_database_list(void)
 		avdb->adw_datid = HeapTupleGetOid(tup);
 		avdb->adw_name = pstrdup(NameStr(pgdatabase->datname));
 		avdb->adw_frozenxid = pgdatabase->datfrozenxid;
-		avdb->adw_frozenmulti = pgdatabase->datminmxid;
+		avdb->adw_minmulti = pgdatabase->datminmxid;
 		/* this gets set later: */
 		avdb->adw_entry = NULL;
 
@@ -2002,7 +2001,7 @@ do_autovacuum(void)
 	 * wide tables there might be proportionally much more activity in the
 	 * TOAST table than in its parent.
 	 */
-	relScan = heap_beginscan(classRel, SnapshotNow, 0, NULL);
+	relScan = heap_beginscan_catalog(classRel, 0, NULL);
 
 	/*
 	 * On the first pass, we collect main tables to vacuum, and also the main
@@ -2120,7 +2119,7 @@ do_autovacuum(void)
 				BTEqualStrategyNumber, F_CHAREQ,
 				CharGetDatum(RELKIND_TOASTVALUE));
 
-	relScan = heap_beginscan(classRel, SnapshotNow, 1, &key);
+	relScan = heap_beginscan_catalog(classRel, 1, &key);
 	while ((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
 	{
 		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
@@ -2631,7 +2630,7 @@ relation_needs_vacanalyze(Oid relid,
 	/* freeze parameters */
 	int			freeze_max_age;
 	TransactionId xidForceLimit;
-	MultiXactId	multiForceLimit;
+	MultiXactId multiForceLimit;
 
 	AssertArg(classForm != NULL);
 	AssertArg(OidIsValid(relid));

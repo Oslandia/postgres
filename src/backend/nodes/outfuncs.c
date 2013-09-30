@@ -332,6 +332,7 @@ _outModifyTable(StringInfo str, const ModifyTable *node)
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_INT_FIELD(resultRelIndex);
 	WRITE_NODE_FIELD(plans);
+	WRITE_NODE_FIELD(withCheckOptionLists);
 	WRITE_NODE_FIELD(returningLists);
 	WRITE_NODE_FIELD(fdwPrivLists);
 	WRITE_NODE_FIELD(rowMarks);
@@ -520,6 +521,7 @@ _outFunctionScan(StringInfo str, const FunctionScan *node)
 	WRITE_NODE_FIELD(funccoltypes);
 	WRITE_NODE_FIELD(funccoltypmods);
 	WRITE_NODE_FIELD(funccolcollations);
+	WRITE_BOOL_FIELD(funcordinality);
 }
 
 static void
@@ -958,7 +960,9 @@ _outAggref(StringInfo str, const Aggref *node)
 	WRITE_NODE_FIELD(args);
 	WRITE_NODE_FIELD(aggorder);
 	WRITE_NODE_FIELD(aggdistinct);
+	WRITE_NODE_FIELD(aggfilter);
 	WRITE_BOOL_FIELD(aggstar);
+	WRITE_BOOL_FIELD(aggvariadic);
 	WRITE_UINT_FIELD(agglevelsup);
 	WRITE_LOCATION_FIELD(location);
 }
@@ -973,6 +977,7 @@ _outWindowFunc(StringInfo str, const WindowFunc *node)
 	WRITE_OID_FIELD(wincollid);
 	WRITE_OID_FIELD(inputcollid);
 	WRITE_NODE_FIELD(args);
+	WRITE_NODE_FIELD(aggfilter);
 	WRITE_UINT_FIELD(winref);
 	WRITE_BOOL_FIELD(winstar);
 	WRITE_BOOL_FIELD(winagg);
@@ -1753,6 +1758,7 @@ _outRelOptInfo(StringInfo str, const RelOptInfo *node)
 	WRITE_INT_FIELD(max_attr);
 	WRITE_NODE_FIELD(lateral_vars);
 	WRITE_BITMAPSET_FIELD(lateral_relids);
+	WRITE_BITMAPSET_FIELD(lateral_referencers);
 	WRITE_NODE_FIELD(indexlist);
 	WRITE_UINT_FIELD(pages);
 	WRITE_FLOAT_FIELD(tuples, "%.0f");
@@ -1910,8 +1916,8 @@ _outLateralJoinInfo(StringInfo str, const LateralJoinInfo *node)
 {
 	WRITE_NODE_TYPE("LATERALJOININFO");
 
-	WRITE_UINT_FIELD(lateral_rhs);
 	WRITE_BITMAPSET_FIELD(lateral_lhs);
+	WRITE_BITMAPSET_FIELD(lateral_rhs);
 }
 
 static void
@@ -1935,8 +1941,8 @@ _outPlaceHolderInfo(StringInfo str, const PlaceHolderInfo *node)
 	WRITE_UINT_FIELD(phid);
 	WRITE_NODE_FIELD(ph_var);
 	WRITE_BITMAPSET_FIELD(ph_eval_at);
+	WRITE_BITMAPSET_FIELD(ph_lateral);
 	WRITE_BITMAPSET_FIELD(ph_needed);
-	WRITE_BITMAPSET_FIELD(ph_may_need);
 	WRITE_INT_FIELD(ph_width);
 }
 
@@ -2081,6 +2087,7 @@ _outFuncCall(StringInfo str, const FuncCall *node)
 	WRITE_NODE_FIELD(funcname);
 	WRITE_NODE_FIELD(args);
 	WRITE_NODE_FIELD(agg_order);
+	WRITE_NODE_FIELD(agg_filter);
 	WRITE_BOOL_FIELD(agg_star);
 	WRITE_BOOL_FIELD(agg_distinct);
 	WRITE_BOOL_FIELD(func_variadic);
@@ -2245,6 +2252,7 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(jointree);
 	WRITE_NODE_FIELD(targetList);
+	WRITE_NODE_FIELD(withCheckOptions);
 	WRITE_NODE_FIELD(returningList);
 	WRITE_NODE_FIELD(groupClause);
 	WRITE_NODE_FIELD(havingQual);
@@ -2256,6 +2264,16 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(setOperations);
 	WRITE_NODE_FIELD(constraintDeps);
+}
+
+static void
+_outWithCheckOption(StringInfo str, const WithCheckOption *node)
+{
+	WRITE_NODE_TYPE("WITHCHECKOPTION");
+
+	WRITE_STRING_FIELD(viewname);
+	WRITE_NODE_FIELD(qual);
+	WRITE_BOOL_FIELD(cascaded);
 }
 
 static void
@@ -2354,7 +2372,6 @@ _outRangeTblEntry(StringInfo str, const RangeTblEntry *node)
 		case RTE_RELATION:
 			WRITE_OID_FIELD(relid);
 			WRITE_CHAR_FIELD(relkind);
-			WRITE_BOOL_FIELD(isResultRel);
 			break;
 		case RTE_SUBQUERY:
 			WRITE_NODE_FIELD(subquery);
@@ -2369,6 +2386,7 @@ _outRangeTblEntry(StringInfo str, const RangeTblEntry *node)
 			WRITE_NODE_FIELD(funccoltypes);
 			WRITE_NODE_FIELD(funccoltypmods);
 			WRITE_NODE_FIELD(funccolcollations);
+			WRITE_BOOL_FIELD(funcordinality);
 			break;
 		case RTE_VALUES:
 			WRITE_NODE_FIELD(values_lists);
@@ -2601,6 +2619,7 @@ _outRangeFunction(StringInfo str, const RangeFunction *node)
 {
 	WRITE_NODE_TYPE("RANGEFUNCTION");
 
+	WRITE_BOOL_FIELD(ordinality);
 	WRITE_BOOL_FIELD(lateral);
 	WRITE_NODE_FIELD(funccallnode);
 	WRITE_NODE_FIELD(alias);
@@ -3112,6 +3131,9 @@ _outNode(StringInfo str, const void *obj)
 				break;
 			case T_Query:
 				_outQuery(str, obj);
+				break;
+			case T_WithCheckOption:
+				_outWithCheckOption(str, obj);
 				break;
 			case T_SortGroupClause:
 				_outSortGroupClause(str, obj);

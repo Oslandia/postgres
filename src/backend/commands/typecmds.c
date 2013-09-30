@@ -71,6 +71,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
@@ -598,32 +599,32 @@ DefineType(List *names, List *parameters)
 						array_type,		/* type name */
 						typeNamespace,	/* namespace */
 						InvalidOid,		/* relation oid (n/a here) */
-						0,				/* relation kind (ditto) */
-						GetUserId(),		/* owner's ID */
-						-1,				/* internal size (always varlena) */
+						0,		/* relation kind (ditto) */
+						GetUserId(),	/* owner's ID */
+						-1,		/* internal size (always varlena) */
 						TYPTYPE_BASE,	/* type-type (base type) */
 						TYPCATEGORY_ARRAY,		/* type-category (array) */
-						false,			/* array types are never preferred */
+						false,	/* array types are never preferred */
 						delimiter,		/* array element delimiter */
 						F_ARRAY_IN,		/* input procedure */
-						F_ARRAY_OUT,		/* output procedure */
+						F_ARRAY_OUT,	/* output procedure */
 						F_ARRAY_RECV,	/* receive procedure */
 						F_ARRAY_SEND,	/* send procedure */
-						typmodinOid,		/* typmodin procedure */
+						typmodinOid,	/* typmodin procedure */
 						typmodoutOid,	/* typmodout procedure */
 						F_ARRAY_TYPANALYZE,		/* analyze procedure */
-						typoid,			/* element type ID */
-						true,			/* yes this is an array type */
+						typoid, /* element type ID */
+						true,	/* yes this is an array type */
 						InvalidOid,		/* no further array type */
 						InvalidOid,		/* base type ID */
-						NULL,			/* never a default type value */
-						NULL,			/* binary default isn't sent either */
-						false,			/* never passed by value */
+						NULL,	/* never a default type value */
+						NULL,	/* binary default isn't sent either */
+						false,	/* never passed by value */
 						alignment,		/* see above */
-						'x',				/* ARRAY is always toastable */
-						-1,				/* typMod (Domains only) */
-						0,				/* Array dimensions of typbasetype */
-						false,			/* Type NOT NULL */
+						'x',	/* ARRAY is always toastable */
+						-1,		/* typMod (Domains only) */
+						0,		/* Array dimensions of typbasetype */
+						false,	/* Type NOT NULL */
 						collation);		/* type's collation */
 
 	pfree(array_type);
@@ -924,8 +925,8 @@ DefineDomain(CreateDomainStmt *stmt)
 				/*
 				 * Check constraints are handled after domain creation, as
 				 * they require the Oid of the domain; at this point we can
-				 * only check that they're not marked NO INHERIT, because
-				 * that would be bogus.
+				 * only check that they're not marked NO INHERIT, because that
+				 * would be bogus.
 				 */
 				if (constr->is_no_inherit)
 					ereport(ERROR,
@@ -1191,19 +1192,19 @@ AlterEnum(AlterEnumStmt *stmt, bool isTopLevel)
 	/*
 	 * Ordinarily we disallow adding values within transaction blocks, because
 	 * we can't cope with enum OID values getting into indexes and then having
-	 * their defining pg_enum entries go away.  However, it's okay if the enum
-	 * type was created in the current transaction, since then there can be
-	 * no such indexes that wouldn't themselves go away on rollback.  (We
-	 * support this case because pg_dump --binary-upgrade needs it.)  We test
-	 * this by seeing if the pg_type row has xmin == current XID and is not
-	 * HEAP_UPDATED.  If it is HEAP_UPDATED, we can't be sure whether the
-	 * type was created or only modified in this xact.  So we are disallowing
-	 * some cases that could theoretically be safe; but fortunately pg_dump
-	 * only needs the simplest case.
+	 * their defining pg_enum entries go away.	However, it's okay if the enum
+	 * type was created in the current transaction, since then there can be no
+	 * such indexes that wouldn't themselves go away on rollback.  (We support
+	 * this case because pg_dump --binary-upgrade needs it.)  We test this by
+	 * seeing if the pg_type row has xmin == current XID and is not
+	 * HEAP_UPDATED.  If it is HEAP_UPDATED, we can't be sure whether the type
+	 * was created or only modified in this xact.  So we are disallowing some
+	 * cases that could theoretically be safe; but fortunately pg_dump only
+	 * needs the simplest case.
 	 */
 	if (HeapTupleHeaderGetXmin(tup->t_data) == GetCurrentTransactionId() &&
 		!(tup->t_data->t_infomask & HEAP_UPDATED))
-		/* safe to do inside transaction block */ ;
+		 /* safe to do inside transaction block */ ;
 	else
 		PreventTransactionChain(isTopLevel, "ALTER TYPE ... ADD");
 
@@ -2256,9 +2257,11 @@ AlterDomainNotNull(List *names, bool notNull)
 			TupleDesc	tupdesc = RelationGetDescr(testrel);
 			HeapScanDesc scan;
 			HeapTuple	tuple;
+			Snapshot	snapshot;
 
 			/* Scan all tuples in this relation */
-			scan = heap_beginscan(testrel, SnapshotNow, 0, NULL);
+			snapshot = RegisterSnapshot(GetLatestSnapshot());
+			scan = heap_beginscan(testrel, snapshot, 0, NULL);
 			while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 			{
 				int			i;
@@ -2273,7 +2276,7 @@ AlterDomainNotNull(List *names, bool notNull)
 						/*
 						 * In principle the auxiliary information for this
 						 * error should be errdatatype(), but errtablecol()
-						 * seems considerably more useful in practice.  Since
+						 * seems considerably more useful in practice.	Since
 						 * this code only executes in an ALTER DOMAIN command,
 						 * the client should already know which domain is in
 						 * question.
@@ -2288,6 +2291,7 @@ AlterDomainNotNull(List *names, bool notNull)
 				}
 			}
 			heap_endscan(scan);
+			UnregisterSnapshot(snapshot);
 
 			/* Close each rel after processing, but keep lock */
 			heap_close(testrel, NoLock);
@@ -2356,7 +2360,7 @@ AlterDomainDropConstraint(List *names, const char *constrName,
 				ObjectIdGetDatum(HeapTupleGetOid(tup)));
 
 	conscan = systable_beginscan(conrel, ConstraintTypidIndexId, true,
-								 SnapshotNow, 1, key);
+								 NULL, 1, key);
 
 	/*
 	 * Scan over the result set, removing any matching entries.
@@ -2551,7 +2555,7 @@ AlterDomainValidateConstraint(List *names, char *constrName)
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(domainoid));
 	scan = systable_beginscan(conrel, ConstraintTypidIndexId,
-							  true, SnapshotNow, 1, &key);
+							  true, NULL, 1, &key);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
@@ -2638,9 +2642,11 @@ validateDomainConstraint(Oid domainoid, char *ccbin)
 		TupleDesc	tupdesc = RelationGetDescr(testrel);
 		HeapScanDesc scan;
 		HeapTuple	tuple;
+		Snapshot	snapshot;
 
 		/* Scan all tuples in this relation */
-		scan = heap_beginscan(testrel, SnapshotNow, 0, NULL);
+		snapshot = RegisterSnapshot(GetLatestSnapshot());
+		scan = heap_beginscan(testrel, snapshot, 0, NULL);
 		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 		{
 			int			i;
@@ -2667,7 +2673,7 @@ validateDomainConstraint(Oid domainoid, char *ccbin)
 					/*
 					 * In principle the auxiliary information for this error
 					 * should be errdomainconstraint(), but errtablecol()
-					 * seems considerably more useful in practice.  Since this
+					 * seems considerably more useful in practice.	Since this
 					 * code only executes in an ALTER DOMAIN command, the
 					 * client should already know which domain is in question,
 					 * and which constraint too.
@@ -2684,6 +2690,7 @@ validateDomainConstraint(Oid domainoid, char *ccbin)
 			ResetExprContext(econtext);
 		}
 		heap_endscan(scan);
+		UnregisterSnapshot(snapshot);
 
 		/* Hold relation lock till commit (XXX bad for concurrency) */
 		heap_close(testrel, NoLock);
@@ -2751,7 +2758,7 @@ get_rels_with_domain(Oid domainOid, LOCKMODE lockmode)
 				ObjectIdGetDatum(domainOid));
 
 	depScan = systable_beginscan(depRel, DependReferenceIndexId, true,
-								 SnapshotNow, 2, key);
+								 NULL, 2, key);
 
 	while (HeapTupleIsValid(depTup = systable_getnext(depScan)))
 	{
@@ -2813,7 +2820,14 @@ get_rels_with_domain(Oid domainOid, LOCKMODE lockmode)
 												 NULL,
 												 format_type_be(domainOid));
 
-			/* Otherwise we can ignore views, composite types, etc */
+			/*
+			 * Otherwise, we can ignore relations except those with both
+			 * storage and user-chosen column types.
+			 *
+			 * XXX If an index-only scan could satisfy "col::some_domain" from
+			 * a suitable expression index, this should also check expression
+			 * index columns.
+			 */
 			if (rel->rd_rel->relkind != RELKIND_RELATION &&
 				rel->rd_rel->relkind != RELKIND_MATVIEW)
 			{
@@ -3005,7 +3019,7 @@ domainAddConstraint(Oid domainOid, Oid domainNamespace, Oid baseTypeOid,
 						  true, /* is local */
 						  0,	/* inhcount */
 						  false,	/* connoinherit */
-						  false);	/* is_internal */
+						  false);		/* is_internal */
 
 	/*
 	 * Return the compiled constraint expression so the calling routine can
@@ -3066,7 +3080,7 @@ GetDomainConstraints(Oid typeOid)
 					ObjectIdGetDatum(typeOid));
 
 		scan = systable_beginscan(conRel, ConstraintTypidIndexId, true,
-								  SnapshotNow, 1, key);
+								  NULL, 1, key);
 
 		while (HeapTupleIsValid(conTup = systable_getnext(scan)))
 		{
@@ -3348,7 +3362,7 @@ AlterTypeOwner(List *names, Oid newOwnerId, ObjectType objecttype)
  * hasDependEntry should be TRUE if type is expected to have a pg_shdepend
  * entry (ie, it's not a table rowtype nor an array type).
  * is_primary_ops should be TRUE if this function is invoked with user's
- * direct operation (e.g, shdepReassignOwned). Elsewhere, 
+ * direct operation (e.g, shdepReassignOwned). Elsewhere,
  */
 void
 AlterTypeOwnerInternal(Oid typeOid, Oid newOwnerId,
@@ -3397,7 +3411,7 @@ AlterTypeNamespace(List *names, const char *newschema, ObjectType objecttype)
 	TypeName   *typename;
 	Oid			typeOid;
 	Oid			nspOid;
-	ObjectAddresses	*objsMoved;
+	ObjectAddresses *objsMoved;
 
 	/* Make a TypeName so we can use standard type lookup machinery */
 	typename = makeTypeNameFromNameList(names);

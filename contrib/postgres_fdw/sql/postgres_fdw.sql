@@ -88,6 +88,7 @@ ALTER FOREIGN TABLE ft2 DROP COLUMN cx;
 -- configure options
 ALTER SERVER testserver1 OPTIONS (
 	use_remote_estimate 'false',
+	updatable 'true',
 	fdw_startup_cost '123.456',
 	fdw_tuple_cost '0.123',
 	service 'value',
@@ -329,9 +330,9 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER t1_br_insert BEFORE INSERT OR UPDATE
     ON "S 1"."T 1" FOR EACH ROW EXECUTE PROCEDURE "S 1".F_BRTRIG();
 
-INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 218, 'fff') RETURNING *;
-INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 218, 'ggg', '(--;') RETURNING *;
-UPDATE ft2 SET c2 = c2 + 600 WHERE c1 % 10 = 8 RETURNING *;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 818, 'fff') RETURNING *;
+INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 818, 'ggg', '(--;') RETURNING *;
+UPDATE ft2 SET c2 = c2 + 600 WHERE c1 % 10 = 8 AND c1 < 1200 RETURNING *;
 
 -- Test errors thrown on remote side during update
 ALTER TABLE "S 1"."T 1" ADD CONSTRAINT c2positive CHECK (c2 >= 0);
@@ -369,3 +370,17 @@ select c2, count(*) from "S 1"."T 1" where c2 < 500 group by 1 order by 1;
 commit;
 select c2, count(*) from ft2 where c2 < 500 group by 1 order by 1;
 select c2, count(*) from "S 1"."T 1" where c2 < 500 group by 1 order by 1;
+
+-- ===================================================================
+-- test serial columns (ie, sequence-based defaults)
+-- ===================================================================
+create table loc1 (f1 serial, f2 text);
+create foreign table rem1 (f1 serial, f2 text)
+  server loopback options(table_name 'loc1');
+select pg_catalog.setval('rem1_f1_seq', 10, false);
+insert into loc1(f2) values('hi');
+insert into rem1(f2) values('hi remote');
+insert into loc1(f2) values('bye');
+insert into rem1(f2) values('bye remote');
+select * from loc1;
+select * from rem1;

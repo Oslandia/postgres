@@ -247,7 +247,9 @@ typedef struct Aggref
 	List	   *args;			/* arguments and sort expressions */
 	List	   *aggorder;		/* ORDER BY (list of SortGroupClause) */
 	List	   *aggdistinct;	/* DISTINCT (list of SortGroupClause) */
+	Expr	   *aggfilter;		/* FILTER expression */
 	bool		aggstar;		/* TRUE if argument list was really '*' */
+	bool		aggvariadic;	/* TRUE if VARIADIC was used in call */
 	Index		agglevelsup;	/* > 0 if agg belongs to outer query */
 	int			location;		/* token location, or -1 if unknown */
 } Aggref;
@@ -263,6 +265,7 @@ typedef struct WindowFunc
 	Oid			wincollid;		/* OID of collation of result */
 	Oid			inputcollid;	/* OID of collation that function should use */
 	List	   *args;			/* arguments to the window function */
+	Expr	   *aggfilter;		/* FILTER expression */
 	Index		winref;			/* index of associated WindowClause */
 	bool		winstar;		/* TRUE if argument list was really '*' */
 	bool		winagg;			/* is function a simple aggregate? */
@@ -327,7 +330,7 @@ typedef enum CoercionContext
  * NB: equal() ignores CoercionForm fields, therefore this *must* not carry
  * any semantically significant information.  We need that behavior so that
  * the planner will consider equivalent implicit and explicit casts to be
- * equivalent.  In cases where those actually behave differently, the coercion
+ * equivalent.	In cases where those actually behave differently, the coercion
  * function's arguments will be different.
  */
 typedef enum CoercionForm

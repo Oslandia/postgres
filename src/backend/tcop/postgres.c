@@ -2525,6 +2525,13 @@ quickdie(SIGNAL_ARGS)
 	PG_SETMASK(&BlockSig);
 
 	/*
+	 * Prevent interrupts while exiting; though we just blocked signals that
+	 * would queue new interrupts, one may have been pending.  We don't want a
+	 * quickdie() downgraded to a mere query cancel.
+	 */
+	HOLD_INTERRUPTS();
+
+	/*
 	 * If we're aborting out of client auth, don't risk trying to send
 	 * anything to the client; we will likely violate the protocol, not to
 	 * mention that we may have interrupted the guts of OpenSSL or some
@@ -2895,7 +2902,7 @@ ProcessInterrupts(void)
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			ereport(ERROR,
-					(errcode(ERRCODE_QUERY_CANCELED),
+					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
 					 errmsg("canceling statement due to lock timeout")));
 		}
 		if (get_timeout_indicator(STATEMENT_TIMEOUT, true))
@@ -3622,7 +3629,7 @@ PostgresMain(int argc, char *argv[],
 			pqsignal(SIGQUIT, quickdie);		/* hard crash time */
 		else
 			pqsignal(SIGQUIT, die);		/* cancel current query and exit */
-		InitializeTimeouts();		/* establishes SIGALRM handler */
+		InitializeTimeouts();	/* establishes SIGALRM handler */
 
 		/*
 		 * Ignore failure to write to frontend. Note: if frontend closes
@@ -3738,7 +3745,7 @@ PostgresMain(int argc, char *argv[],
 	 * process any libraries that should be preloaded at backend start (this
 	 * likewise can't be done until GUC settings are complete)
 	 */
-	process_local_preload_libraries();
+	process_session_preload_libraries();
 
 	/*
 	 * Send this backend's cancellation info to the frontend.

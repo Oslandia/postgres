@@ -59,6 +59,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/tqual.h"
 
@@ -562,15 +563,35 @@ pgstat_reset_remove_files(const char *directory)
 	struct dirent *entry;
 	char		fname[MAXPGPATH];
 
-	dir = AllocateDir(pgstat_stat_directory);
-	while ((entry = ReadDir(dir, pgstat_stat_directory)) != NULL)
+	dir = AllocateDir(directory);
+	while ((entry = ReadDir(dir, directory)) != NULL)
 	{
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+		int			nchars;
+		Oid			tmp_oid;
+
+		/*
+		 * Skip directory entries that don't match the file names we write.
+		 * See get_dbstat_filename for the database-specific pattern.
+		 */
+		if (strncmp(entry->d_name, "global.", 7) == 0)
+			nchars = 7;
+		else
+		{
+			nchars = 0;
+			(void) sscanf(entry->d_name, "db_%u.%n",
+						  &tmp_oid, &nchars);
+			if (nchars <= 0)
+				continue;
+			/* %u allows leading whitespace, so reject that */
+			if (strchr("0123456789", entry->d_name[3]) == NULL)
+				continue;
+		}
+
+		if (strcmp(entry->d_name + nchars, "tmp") != 0 &&
+			strcmp(entry->d_name + nchars, "stat") != 0)
 			continue;
 
-		/* XXX should we try to ignore files other than the ones we write? */
-
-		snprintf(fname, MAXPGPATH, "%s/%s", pgstat_stat_directory,
+		snprintf(fname, MAXPGPATH, "%s/%s", directory,
 				 entry->d_name);
 		unlink(fname);
 	}
@@ -1097,6 +1118,7 @@ pgstat_collect_oids(Oid catalogid)
 	Relation	rel;
 	HeapScanDesc scan;
 	HeapTuple	tup;
+	Snapshot	snapshot;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
@@ -1109,7 +1131,8 @@ pgstat_collect_oids(Oid catalogid)
 					   HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 
 	rel = heap_open(catalogid, AccessShareLock);
-	scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	scan = heap_beginscan(rel, snapshot, 0, NULL);
 	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
 		Oid			thisoid = HeapTupleGetOid(tup);
@@ -1119,6 +1142,7 @@ pgstat_collect_oids(Oid catalogid)
 		(void) hash_search(htab, (void *) &thisoid, HASH_ENTER, NULL);
 	}
 	heap_endscan(scan);
+	UnregisterSnapshot(snapshot);
 	heap_close(rel, AccessShareLock);
 
 	return htab;
@@ -2586,7 +2610,7 @@ pgstat_report_activity(BackendState state, const char *cmd_str)
 		{
 			/*
 			 * track_activities is disabled, but we last reported a
-			 * non-disabled state.  As our final update, change the state and
+			 * non-disabled state.	As our final update, change the state and
 			 * clear fields we will not be updating anymore.
 			 */
 			beentry->st_changecount++;
@@ -3598,6 +3622,13 @@ pgstat_write_statsfiles(bool permanent, bool allDbs)
 	{
 		slist_mutable_iter iter;
 
+		/*
+		 * Strictly speaking we should do slist_delete_current() before
+		 * freeing each request struct.  We skip that and instead
+		 * re-initialize the list header at the end.  Nonetheless, we must use
+		 * slist_foreach_modify, not just slist_foreach, since we will free
+		 * the node's storage before advancing.
+		 */
 		slist_foreach_modify(iter, &last_statrequests)
 		{
 			DBWriteRequest *req;
@@ -3620,6 +3651,7 @@ get_dbstat_filename(bool permanent, bool tempname, Oid databaseid,
 {
 	int			printed;
 
+	/* NB -- pgstat_reset_remove_files knows about the pattern this uses */
 	printed = snprintf(filename, len, "%s/db_%u.%s",
 					   permanent ? PGSTAT_STAT_PERMANENT_DIRECTORY :
 					   pgstat_stat_directory,
@@ -4401,9 +4433,9 @@ pgstat_recv_inquiry(PgStat_MsgInquiry *msg, int len)
 	 * request's cutoff time, update it; otherwise there's nothing to do.
 	 *
 	 * Note that if a request is found, we return early and skip the below
-	 * check for clock skew.  This is okay, since the only way for a DB request
-	 * to be present in the list is that we have been here since the last write
-	 * round.
+	 * check for clock skew.  This is okay, since the only way for a DB
+	 * request to be present in the list is that we have been here since the
+	 * last write round.
 	 */
 	slist_foreach(iter, &last_statrequests)
 	{

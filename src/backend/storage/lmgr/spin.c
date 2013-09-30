@@ -22,6 +22,7 @@
  */
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "miscadmin.h"
 #include "replication/walsender.h"
 #include "storage/lwlock.h"
@@ -51,7 +52,7 @@ SpinlockSemas(void)
 int
 SpinlockSemas(void)
 {
-	int		nsemas;
+	int			nsemas;
 
 	/*
 	 * It would be cleaner to distribute this logic into the affected modules,
@@ -63,6 +64,7 @@ SpinlockSemas(void)
 	nsemas = NumLWLocks();		/* one for each lwlock */
 	nsemas += NBuffers;			/* one for each buffer header */
 	nsemas += max_wal_senders;	/* one for each wal sender process */
+	nsemas += num_xloginsert_slots; /* one for each WAL insertion slot */
 	nsemas += 30;				/* plus a bunch for other small-scale use */
 
 	return nsemas;

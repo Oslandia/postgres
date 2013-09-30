@@ -292,7 +292,7 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 				 */
 				if (DataChecksumsEnabled())
 				{
-					Page heapPage = BufferGetPage(heapBuf);
+					Page		heapPage = BufferGetPage(heapBuf);
 
 					/* caller is expected to set PD_ALL_VISIBLE first */
 					Assert(PageIsAllVisible(heapPage));
@@ -476,11 +476,15 @@ visibilitymap_truncate(Relation rel, BlockNumber nheapblocks)
 		/* Clear out the unwanted bytes. */
 		MemSet(&map[truncByte + 1], 0, MAPSIZE - (truncByte + 1));
 
-		/*
+		/*----
 		 * Mask out the unwanted bits of the last remaining byte.
 		 *
-		 * ((1 << 0) - 1) = 00000000 ((1 << 1) - 1) = 00000001 ... ((1 << 6) -
-		 * 1) = 00111111 ((1 << 7) - 1) = 01111111
+		 * ((1 << 0) - 1) = 00000000
+		 * ((1 << 1) - 1) = 00000001
+		 * ...
+		 * ((1 << 6) - 1) = 00111111
+		 * ((1 << 7) - 1) = 01111111
+		 *----
 		 */
 		map[truncByte] &= (1 << truncBit) - 1;
 

@@ -21,6 +21,7 @@
 #include "access/sysattr.h"
 #include "access/tuptoaster.h"
 #include "access/valid.h"
+#include "access/xact.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
@@ -291,7 +292,7 @@ CatalogCacheComputeTupleHashValue(CatCache *cache, HeapTuple tuple)
 static void
 CatCachePrintStats(int code, Datum arg)
 {
-	slist_iter  iter;
+	slist_iter	iter;
 	long		cc_searches = 0;
 	long		cc_hits = 0;
 	long		cc_neg_hits = 0;
@@ -444,7 +445,7 @@ CatCacheRemoveCList(CatCache *cache, CatCList *cl)
 void
 CatalogCacheIdInvalidate(int cacheId, uint32 hashValue)
 {
-	slist_iter cache_iter;
+	slist_iter	cache_iter;
 
 	CACHE1_elog(DEBUG2, "CatalogCacheIdInvalidate: called");
 
@@ -554,12 +555,12 @@ AtEOXact_CatCache(bool isCommit)
 #ifdef USE_ASSERT_CHECKING
 	if (assert_enabled)
 	{
-		slist_iter  cache_iter;
+		slist_iter	cache_iter;
 
 		slist_foreach(cache_iter, &CacheHdr->ch_caches)
 		{
 			CatCache   *ccp = slist_container(CatCache, cc_next, cache_iter.cur);
-			dlist_iter  iter;
+			dlist_iter	iter;
 			int			i;
 
 			/* Check CatCLists */
@@ -649,7 +650,7 @@ ResetCatalogCache(CatCache *cache)
 void
 ResetCatalogCaches(void)
 {
-	slist_iter    iter;
+	slist_iter	iter;
 
 	CACHE1_elog(DEBUG2, "ResetCatalogCaches called");
 
@@ -679,7 +680,7 @@ ResetCatalogCaches(void)
 void
 CatalogCacheFlushCatalog(Oid catId)
 {
-	slist_iter  iter;
+	slist_iter	iter;
 
 	CACHE2_elog(DEBUG2, "CatalogCacheFlushCatalog called for %u", catId);
 
@@ -733,9 +734,8 @@ InitCatCache(int id,
 	int			i;
 
 	/*
-	 * nbuckets is the number of hash buckets to use in this catcache.
-	 * Currently we just use a hard-wired estimate of an appropriate size for
-	 * each cache; maybe later make them dynamically resizable?
+	 * nbuckets is the initial number of hash buckets to use in this catcache.
+	 * It will be enlarged later if it becomes too full.
 	 *
 	 * nbuckets must be a power of two.  We check this via Assert rather than
 	 * a full runtime check because the values will be coming from constant
@@ -774,7 +774,8 @@ InitCatCache(int id,
 	 *
 	 * Note: we rely on zeroing to initialize all the dlist headers correctly
 	 */
-	cp = (CatCache *) palloc0(sizeof(CatCache) + nbuckets * sizeof(dlist_head));
+	cp = (CatCache *) palloc0(sizeof(CatCache));
+	cp->cc_bucket = palloc0(nbuckets * sizeof(dlist_head));
 
 	/*
 	 * initialize the cache's relation information for the relation
@@ -810,6 +811,43 @@ InitCatCache(int id,
 	MemoryContextSwitchTo(oldcxt);
 
 	return cp;
+}
+
+/*
+ * Enlarge a catcache, doubling the number of buckets.
+ */
+static void
+RehashCatCache(CatCache *cp)
+{
+	dlist_head *newbucket;
+	int			newnbuckets;
+	int			i;
+
+	elog(DEBUG1, "rehashing catalog cache id %d for %s; %d tups, %d buckets",
+		 cp->id, cp->cc_relname, cp->cc_ntup, cp->cc_nbuckets);
+
+	/* Allocate a new, larger, hash table. */
+	newnbuckets = cp->cc_nbuckets * 2;
+	newbucket = (dlist_head *) MemoryContextAllocZero(CacheMemoryContext, newnbuckets * sizeof(dlist_head));
+
+	/* Move all entries from old hash table to new. */
+	for (i = 0; i < cp->cc_nbuckets; i++)
+	{
+		dlist_mutable_iter iter;
+		dlist_foreach_modify(iter, &cp->cc_bucket[i])
+		{
+			CatCTup	   *ct = dlist_container(CatCTup, cache_elem, iter.cur);
+			int			hashIndex = HASH_INDEX(ct->hash_value, newnbuckets);
+
+			dlist_delete(iter.cur);
+			dlist_push_head(&newbucket[hashIndex], &ct->cache_elem);
+		}
+	}
+
+	/* Switch to the new array. */
+	pfree(cp->cc_bucket);
+	cp->cc_nbuckets = newnbuckets;
+	cp->cc_bucket = newbucket;
 }
 
 /*
@@ -1067,6 +1105,9 @@ SearchCatCache(CatCache *cache,
 	SysScanDesc scandesc;
 	HeapTuple	ntp;
 
+	/* Make sure we're in a xact, even if this ends up being a cache hit */
+	Assert(IsTransactionState());
+
 	/*
 	 * one-time startup overhead for each cache
 	 */
@@ -1182,7 +1223,7 @@ SearchCatCache(CatCache *cache,
 	scandesc = systable_beginscan(relation,
 								  cache->cc_indexoid,
 								  IndexScanOK(cache, cur_skey),
-								  SnapshotNow,
+								  NULL,
 								  cache->cc_nkeys,
 								  cur_skey);
 
@@ -1343,7 +1384,7 @@ SearchCatCacheList(CatCache *cache,
 {
 	ScanKeyData cur_skey[CATCACHE_MAXKEYS];
 	uint32		lHashValue;
-	dlist_iter  iter;
+	dlist_iter	iter;
 	CatCList   *cl;
 	CatCTup    *ct;
 	List	   *volatile ctlist;
@@ -1461,7 +1502,7 @@ SearchCatCacheList(CatCache *cache,
 		scandesc = systable_beginscan(relation,
 									  cache->cc_indexoid,
 									  IndexScanOK(cache, cur_skey),
-									  SnapshotNow,
+									  NULL,
 									  nkeys,
 									  cur_skey);
 
@@ -1680,6 +1721,13 @@ CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp,
 	cache->cc_ntup++;
 	CacheHdr->ch_ntup++;
 
+	/*
+	 * If the hash table has become too full, enlarge the buckets array.
+	 * Quite arbitrarily, we enlarge when fill factor > 2.
+	 */
+	if (cache->cc_ntup > cache->cc_nbuckets * 2)
+		RehashCatCache(cache);
+
 	return ct;
 }
 
@@ -1789,7 +1837,7 @@ PrepareToInvalidateCacheTuple(Relation relation,
 							  HeapTuple newtuple,
 							  void (*function) (int, uint32, Oid))
 {
-	slist_iter  iter;
+	slist_iter	iter;
 	Oid			reloid;
 
 	CACHE1_elog(DEBUG2, "PrepareToInvalidateCacheTuple: called");

@@ -360,7 +360,7 @@ static const SchemaQuery Query_for_list_of_constraints_with_schema = {
 	/* selcondition */
 	"c.conrelid <> 0",
 	/* viscondition */
-	"true",				/* there is no pg_constraint_is_visible */
+	"true",						/* there is no pg_constraint_is_visible */
 	/* namespace */
 	"c.connamespace",
 	/* result */
@@ -646,7 +646,7 @@ static const SchemaQuery Query_for_list_of_matviews = {
 "       and pg_catalog.pg_type_is_visible(t.oid)"
 
 /* the silly-looking length condition is just to eat up the current word */
-#define Query_for_list_of_tables_for_constraint	\
+#define Query_for_list_of_tables_for_constraint \
 "SELECT pg_catalog.quote_ident(relname) "\
 "  FROM pg_catalog.pg_class"\
 " WHERE (%d = pg_catalog.length('%s'))"\
@@ -894,7 +894,7 @@ psql_completion(char *text, int start, int end)
 		"\\a", "\\connect", "\\conninfo", "\\C", "\\cd", "\\copy", "\\copyright",
 		"\\d", "\\da", "\\db", "\\dc", "\\dC", "\\dd", "\\dD", "\\des", "\\det", "\\deu", "\\dew", "\\df",
 		"\\dF", "\\dFd", "\\dFp", "\\dFt", "\\dg", "\\di", "\\dl", "\\dL",
-		"\\dn", "\\do", "\\dp", "\\drds", "\\ds", "\\dS", "\\dt", "\\dT", "\\dv", "\\du",
+		"\\dn", "\\do", "\\dp", "\\drds", "\\ds", "\\dS", "\\dt", "\\dT", "\\dv", "\\du", "\\dx",
 		"\\e", "\\echo", "\\ef", "\\encoding",
 		"\\f", "\\g", "\\gset", "\\h", "\\help", "\\H", "\\i", "\\ir", "\\l",
 		"\\lo_import", "\\lo_export", "\\lo_list", "\\lo_unlink",
@@ -1472,7 +1472,11 @@ psql_completion(char *text, int start, int end)
 			 pg_strcasecmp(prev2_wd, "DROP") == 0 &&
 			 pg_strcasecmp(prev_wd, "COLUMN") == 0)
 		COMPLETE_WITH_ATTR(prev3_wd, "");
-	/* If we have ALTER TABLE <sth> DROP|RENAME|VALIDATE CONSTRAINT, provide list of constraints */
+
+	/*
+	 * If we have ALTER TABLE <sth> DROP|RENAME|VALIDATE CONSTRAINT, provide
+	 * list of constraints
+	 */
 	else if (pg_strcasecmp(prev5_wd, "ALTER") == 0 &&
 			 pg_strcasecmp(prev4_wd, "TABLE") == 0 &&
 			 (pg_strcasecmp(prev2_wd, "DROP") == 0 ||
@@ -1832,7 +1836,7 @@ psql_completion(char *text, int start, int end)
 	 * If we have CLUSTER VERBOSE <sth> USING, then add the index as well.
 	 */
 	else if (pg_strcasecmp(prev4_wd, "CLUSTER") == 0 &&
-             pg_strcasecmp(prev3_wd, "VERBOSE") == 0 &&
+			 pg_strcasecmp(prev3_wd, "VERBOSE") == 0 &&
 			 pg_strcasecmp(prev_wd, "USING") == 0)
 	{
 		completion_info_charp = prev2_wd;
@@ -2867,11 +2871,22 @@ psql_completion(char *text, int start, int end)
 	else if (pg_strcasecmp(prev3_wd, "REFRESH") == 0 &&
 			 pg_strcasecmp(prev2_wd, "MATERIALIZED") == 0 &&
 			 pg_strcasecmp(prev_wd, "VIEW") == 0)
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_matviews,
+								   " UNION SELECT 'CONCURRENTLY'");
+	else if (pg_strcasecmp(prev4_wd, "REFRESH") == 0 &&
+			 pg_strcasecmp(prev3_wd, "MATERIALIZED") == 0 &&
+			 pg_strcasecmp(prev2_wd, "VIEW") == 0 &&
+			 pg_strcasecmp(prev_wd, "CONCURRENTLY") == 0)
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_matviews, NULL);
 	else if (pg_strcasecmp(prev4_wd, "REFRESH") == 0 &&
 			 pg_strcasecmp(prev3_wd, "MATERIALIZED") == 0 &&
 			 pg_strcasecmp(prev2_wd, "VIEW") == 0)
 		COMPLETE_WITH_CONST("WITH");
+	else if (pg_strcasecmp(prev5_wd, "REFRESH") == 0 &&
+			 pg_strcasecmp(prev4_wd, "MATERIALIZED") == 0 &&
+			 pg_strcasecmp(prev3_wd, "VIEW") == 0 &&
+			 pg_strcasecmp(prev2_wd, "CONCURRENTLY") == 0)
+		COMPLETE_WITH_CONST("WITH DATA");
 	else if (pg_strcasecmp(prev5_wd, "REFRESH") == 0 &&
 			 pg_strcasecmp(prev4_wd, "MATERIALIZED") == 0 &&
 			 pg_strcasecmp(prev3_wd, "VIEW") == 0 &&
@@ -2882,6 +2897,12 @@ psql_completion(char *text, int start, int end)
 
 		COMPLETE_WITH_LIST(list_WITH_DATA);
 	}
+	else if (pg_strcasecmp(prev6_wd, "REFRESH") == 0 &&
+			 pg_strcasecmp(prev5_wd, "MATERIALIZED") == 0 &&
+			 pg_strcasecmp(prev4_wd, "VIEW") == 0 &&
+			 pg_strcasecmp(prev3_wd, "CONCURRENTLY") == 0 &&
+			 pg_strcasecmp(prev_wd, "WITH") == 0)
+		COMPLETE_WITH_CONST("DATA");
 	else if (pg_strcasecmp(prev6_wd, "REFRESH") == 0 &&
 			 pg_strcasecmp(prev5_wd, "MATERIALIZED") == 0 &&
 			 pg_strcasecmp(prev4_wd, "VIEW") == 0 &&
@@ -2934,7 +2955,7 @@ psql_completion(char *text, int start, int end)
 		static const char *const list_SECURITY_LABEL[] =
 		{"LANGUAGE", "SCHEMA", "SEQUENCE", "TABLE", "TYPE", "VIEW",
 			"MATERIALIZED VIEW", "COLUMN", "AGGREGATE", "FUNCTION", "DOMAIN",
-			"LARGE OBJECT",	NULL};
+		"LARGE OBJECT", NULL};
 
 		COMPLETE_WITH_LIST(list_SECURITY_LABEL);
 	}
@@ -3299,6 +3320,8 @@ psql_completion(char *text, int start, int end)
 		COMPLETE_WITH_QUERY(Query_for_list_of_roles);
 	else if (strncmp(prev_wd, "\\dv", strlen("\\dv")) == 0)
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_views, NULL);
+	else if (strncmp(prev_wd, "\\dx", strlen("\\dx")) == 0)
+		COMPLETE_WITH_QUERY(Query_for_list_of_extensions);
 	else if (strncmp(prev_wd, "\\dm", strlen("\\dm")) == 0)
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_matviews, NULL);
 
@@ -3355,7 +3378,8 @@ psql_completion(char *text, int start, int end)
 			 strcmp(prev_wd, "\\ir") == 0 || strcmp(prev_wd, "\\include_relative") == 0 ||
 			 strcmp(prev_wd, "\\o") == 0 || strcmp(prev_wd, "\\out") == 0 ||
 			 strcmp(prev_wd, "\\s") == 0 ||
-			 strcmp(prev_wd, "\\w") == 0 || strcmp(prev_wd, "\\write") == 0
+			 strcmp(prev_wd, "\\w") == 0 || strcmp(prev_wd, "\\write") == 0 ||
+			 strcmp(prev_wd, "\\lo_import") == 0
 		)
 	{
 		completion_charp = "\\";

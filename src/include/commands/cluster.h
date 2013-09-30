@@ -25,13 +25,14 @@ extern void check_index_is_clusterable(Relation OldHeap, Oid indexOid,
 						   bool recheck, LOCKMODE lockmode);
 extern void mark_index_clustered(Relation rel, Oid indexOid, bool is_internal);
 
-extern Oid	make_new_heap(Oid OIDOldHeap, Oid NewTableSpace);
+extern Oid make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, bool forcetemp,
+			  LOCKMODE lockmode);
 extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 				 bool is_system_catalog,
 				 bool swap_toast_by_content,
 				 bool check_constraints,
 				 bool is_internal,
 				 TransactionId frozenXid,
-				 MultiXactId frozenMulti);
+				 MultiXactId minMulti);
 
 #endif   /* CLUSTER_H */

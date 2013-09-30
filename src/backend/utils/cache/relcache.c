@@ -37,7 +37,6 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -266,8 +265,10 @@ static void unlink_initfile(const char *initfilename);
  *		This is used by RelationBuildDesc to find a pg_class
  *		tuple matching targetRelId.  The caller must hold at least
  *		AccessShareLock on the target relid to prevent concurrent-update
- *		scenarios --- else our SnapshotNow scan might fail to find any
- *		version that it thinks is live.
+ *		scenarios; it isn't guaranteed that all scans used to build the
+ *		relcache entry will use the same snapshot.  If, for example,
+ *		an attribute were to be added after scanning pg_class and before
+ *		scanning pg_attribute, relnatts wouldn't match.
  *
  *		NB: the returned tuple has been copied into palloc'd storage
  *		and must eventually be freed with heap_freetuple.
@@ -306,7 +307,7 @@ ScanPgRelation(Oid targetRelId, bool indexOK)
 	pg_class_desc = heap_open(RelationRelationId, AccessShareLock);
 	pg_class_scan = systable_beginscan(pg_class_desc, ClassOidIndexId,
 									   indexOK && criticalRelcachesBuilt,
-									   SnapshotNow,
+									   NULL,
 									   1, key);
 
 	pg_class_tuple = systable_getnext(pg_class_scan);
@@ -481,7 +482,7 @@ RelationBuildTupleDesc(Relation relation)
 	pg_attribute_scan = systable_beginscan(pg_attribute_desc,
 										   AttributeRelidNumIndexId,
 										   criticalRelcachesBuilt,
-										   SnapshotNow,
+										   NULL,
 										   2, skey);
 
 	/*
@@ -664,7 +665,7 @@ RelationBuildRuleLock(Relation relation)
 	rewrite_tupdesc = RelationGetDescr(rewrite_desc);
 	rewrite_scan = systable_beginscan(rewrite_desc,
 									  RewriteRelRulenameIndexId,
-									  true, SnapshotNow,
+									  true, NULL,
 									  1, &key);
 
 	while (HeapTupleIsValid(rewrite_tuple = systable_getnext(rewrite_scan)))
@@ -681,7 +682,6 @@ RelationBuildRuleLock(Relation relation)
 		rule->ruleId = HeapTupleGetOid(rewrite_tuple);
 
 		rule->event = rewrite_form->ev_type - '0';
-		rule->attrno = rewrite_form->ev_attr;
 		rule->enabled = rewrite_form->ev_enabled;
 		rule->isInstead = rewrite_form->is_instead;
 
@@ -796,8 +796,6 @@ equalRuleLocks(RuleLock *rlock1, RuleLock *rlock2)
 			if (rule1->ruleId != rule2->ruleId)
 				return false;
 			if (rule1->event != rule2->event)
-				return false;
-			if (rule1->attrno != rule2->attrno)
 				return false;
 			if (rule1->enabled != rule2->enabled)
 				return false;
@@ -955,12 +953,6 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
-
-	if (relation->rd_rel->relkind == RELKIND_MATVIEW &&
-		heap_is_matview_init_state(relation))
-		relation->rd_ispopulated = false;
-	else
-		relation->rd_ispopulated = true;
 
 	/*
 	 * now we can free the memory allocated for pg_class_tuple
@@ -1320,7 +1312,7 @@ LookupOpclassInfo(Oid operatorClassOid,
 				ObjectIdGetDatum(operatorClassOid));
 	rel = heap_open(OperatorClassRelationId, AccessShareLock);
 	scan = systable_beginscan(rel, OpclassOidIndexId, indexOK,
-							  SnapshotNow, 1, skey);
+							  NULL, 1, skey);
 
 	if (HeapTupleIsValid(htup = systable_getnext(scan)))
 	{
@@ -1355,7 +1347,7 @@ LookupOpclassInfo(Oid operatorClassOid,
 					ObjectIdGetDatum(opcentry->opcintype));
 		rel = heap_open(AccessMethodProcedureRelationId, AccessShareLock);
 		scan = systable_beginscan(rel, AccessMethodProcedureIndexId, indexOK,
-								  SnapshotNow, 3, skey);
+								  NULL, 3, skey);
 
 		while (HeapTupleIsValid(htup = systable_getnext(scan)))
 		{
@@ -1459,6 +1451,9 @@ formrdesc(const char *relationName, Oid relationReltype,
 	/* formrdesc is used only for permanent relations */
 	relation->rd_rel->relpersistence = RELPERSISTENCE_PERMANENT;
 
+	/* ... and they're always populated, too */
+	relation->rd_rel->relispopulated = true;
+
 	relation->rd_rel->relpages = 0;
 	relation->rd_rel->reltuples = 0;
 	relation->rd_rel->relallvisible = 0;
@@ -1531,7 +1526,6 @@ formrdesc(const char *relationName, Oid relationReltype,
 	 * initialize physical addressing information for the relation
 	 */
 	RelationInitPhysicalAddr(relation);
-	relation->rd_ispopulated = true;
 
 	/*
 	 * initialize the rel-has-index flag, using hardwired knowledge
@@ -1756,7 +1750,6 @@ RelationReloadIndexInfo(Relation relation)
 	heap_freetuple(pg_class_tuple);
 	/* We must recalculate physical address in case it changed */
 	RelationInitPhysicalAddr(relation);
-	relation->rd_ispopulated = true;
 
 	/*
 	 * For a non-system index, there are fields of the pg_index row that are
@@ -1905,11 +1898,6 @@ RelationClearRelation(Relation relation, bool rebuild)
 	if (relation->rd_isnailed)
 	{
 		RelationInitPhysicalAddr(relation);
-		if (relation->rd_rel->relkind == RELKIND_MATVIEW &&
-			heap_is_matview_init_state(relation))
-			relation->rd_ispopulated = false;
-		else
-			relation->rd_ispopulated = true;
 
 		if (relation->rd_rel->relkind == RELKIND_INDEX)
 		{
@@ -2324,7 +2312,7 @@ AtEOXact_RelationCache(bool isCommit)
 	 * For simplicity, eoxact_list[] entries are not deleted till end of
 	 * top-level transaction, even though we could remove them at
 	 * subtransaction end in some cases, or remove relations from the list if
-	 * they are cleared for other reasons.  Therefore we should expect the
+	 * they are cleared for other reasons.	Therefore we should expect the
 	 * case that list entries are not found in the hashtable; if not, there's
 	 * nothing to do for them.
 	 */
@@ -2365,66 +2353,66 @@ AtEOXact_RelationCache(bool isCommit)
 static void
 AtEOXact_cleanup(Relation relation, bool isCommit)
 {
-		/*
-		 * The relcache entry's ref count should be back to its normal
-		 * not-in-a-transaction state: 0 unless it's nailed in cache.
-		 *
-		 * In bootstrap mode, this is NOT true, so don't check it --- the
-		 * bootstrap code expects relations to stay open across start/commit
-		 * transaction calls.  (That seems bogus, but it's not worth fixing.)
-		 *
-		 * Note: ideally this check would be applied to every relcache entry,
-		 * not just those that have eoxact work to do.	But it's not worth
-		 * forcing a scan of the whole relcache just for this.	(Moreover,
-		 * doing so would mean that assert-enabled testing never tests the
-		 * hash_search code path above, which seems a bad idea.)
-		 */
+	/*
+	 * The relcache entry's ref count should be back to its normal
+	 * not-in-a-transaction state: 0 unless it's nailed in cache.
+	 *
+	 * In bootstrap mode, this is NOT true, so don't check it --- the
+	 * bootstrap code expects relations to stay open across start/commit
+	 * transaction calls.  (That seems bogus, but it's not worth fixing.)
+	 *
+	 * Note: ideally this check would be applied to every relcache entry, not
+	 * just those that have eoxact work to do.	But it's not worth forcing a
+	 * scan of the whole relcache just for this.  (Moreover, doing so would
+	 * mean that assert-enabled testing never tests the hash_search code path
+	 * above, which seems a bad idea.)
+	 */
 #ifdef USE_ASSERT_CHECKING
-		if (!IsBootstrapProcessingMode())
-		{
-			int			expected_refcnt;
+	if (!IsBootstrapProcessingMode())
+	{
+		int			expected_refcnt;
 
-			expected_refcnt = relation->rd_isnailed ? 1 : 0;
-			Assert(relation->rd_refcnt == expected_refcnt);
-		}
+		expected_refcnt = relation->rd_isnailed ? 1 : 0;
+		Assert(relation->rd_refcnt == expected_refcnt);
+	}
 #endif
 
-		/*
-		 * Is it a relation created in the current transaction?
-		 *
-		 * During commit, reset the flag to zero, since we are now out of the
-		 * creating transaction.  During abort, simply delete the relcache
-		 * entry --- it isn't interesting any longer.  (NOTE: if we have
-		 * forgotten the new-ness of a new relation due to a forced cache
-		 * flush, the entry will get deleted anyway by shared-cache-inval
-		 * processing of the aborted pg_class insertion.)
-		 */
-		if (relation->rd_createSubid != InvalidSubTransactionId)
+	/*
+	 * Is it a relation created in the current transaction?
+	 *
+	 * During commit, reset the flag to zero, since we are now out of the
+	 * creating transaction.  During abort, simply delete the relcache entry
+	 * --- it isn't interesting any longer.  (NOTE: if we have forgotten the
+	 * new-ness of a new relation due to a forced cache flush, the entry will
+	 * get deleted anyway by shared-cache-inval processing of the aborted
+	 * pg_class insertion.)
+	 */
+	if (relation->rd_createSubid != InvalidSubTransactionId)
+	{
+		if (isCommit)
+			relation->rd_createSubid = InvalidSubTransactionId;
+		else
 		{
-			if (isCommit)
-				relation->rd_createSubid = InvalidSubTransactionId;
-			else
-			{
-				RelationClearRelation(relation, false);
-				return;
-			}
+			RelationClearRelation(relation, false);
+			return;
 		}
+	}
 
-		/*
-		 * Likewise, reset the hint about the relfilenode being new.
-		 */
-		relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
+	/*
+	 * Likewise, reset the hint about the relfilenode being new.
+	 */
+	relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
 
-		/*
-		 * Flush any temporary index list.
-		 */
-		if (relation->rd_indexvalid == 2)
-		{
-			list_free(relation->rd_indexlist);
-			relation->rd_indexlist = NIL;
-			relation->rd_oidindex = InvalidOid;
-			relation->rd_indexvalid = 0;
-		}
+	/*
+	 * Flush any temporary index list.
+	 */
+	if (relation->rd_indexvalid == 2)
+	{
+		list_free(relation->rd_indexlist);
+		relation->rd_indexlist = NIL;
+		relation->rd_oidindex = InvalidOid;
+		relation->rd_indexvalid = 0;
+	}
 }
 
 /*
@@ -2485,45 +2473,44 @@ static void
 AtEOSubXact_cleanup(Relation relation, bool isCommit,
 					SubTransactionId mySubid, SubTransactionId parentSubid)
 {
-		/*
-		 * Is it a relation created in the current subtransaction?
-		 *
-		 * During subcommit, mark it as belonging to the parent, instead.
-		 * During subabort, simply delete the relcache entry.
-		 */
-		if (relation->rd_createSubid == mySubid)
+	/*
+	 * Is it a relation created in the current subtransaction?
+	 *
+	 * During subcommit, mark it as belonging to the parent, instead. During
+	 * subabort, simply delete the relcache entry.
+	 */
+	if (relation->rd_createSubid == mySubid)
+	{
+		if (isCommit)
+			relation->rd_createSubid = parentSubid;
+		else
 		{
-			if (isCommit)
-				relation->rd_createSubid = parentSubid;
-			else
-			{
-				RelationClearRelation(relation, false);
-				return;
-			}
+			RelationClearRelation(relation, false);
+			return;
 		}
+	}
 
-		/*
-		 * Likewise, update or drop any new-relfilenode-in-subtransaction
-		 * hint.
-		 */
-		if (relation->rd_newRelfilenodeSubid == mySubid)
-		{
-			if (isCommit)
-				relation->rd_newRelfilenodeSubid = parentSubid;
-			else
-				relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
-		}
+	/*
+	 * Likewise, update or drop any new-relfilenode-in-subtransaction hint.
+	 */
+	if (relation->rd_newRelfilenodeSubid == mySubid)
+	{
+		if (isCommit)
+			relation->rd_newRelfilenodeSubid = parentSubid;
+		else
+			relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
+	}
 
-		/*
-		 * Flush any temporary index list.
-		 */
-		if (relation->rd_indexvalid == 2)
-		{
-			list_free(relation->rd_indexlist);
-			relation->rd_indexlist = NIL;
-			relation->rd_oidindex = InvalidOid;
-			relation->rd_indexvalid = 0;
-		}
+	/*
+	 * Flush any temporary index list.
+	 */
+	if (relation->rd_indexvalid == 2)
+	{
+		list_free(relation->rd_indexlist);
+		relation->rd_indexlist = NIL;
+		relation->rd_oidindex = InvalidOid;
+		relation->rd_indexvalid = 0;
+	}
 }
 
 
@@ -2671,6 +2658,12 @@ RelationBuildLocalRelation(const char *relname,
 			break;
 	}
 
+	/* if it's a materialized view, it's not populated initially */
+	if (relkind == RELKIND_MATVIEW)
+		rel->rd_rel->relispopulated = false;
+	else
+		rel->rd_rel->relispopulated = true;
+
 	/*
 	 * Insert relation physical and logical identifiers (OIDs) into the right
 	 * places.	For a mapped relation, we set relfilenode to zero and rely on
@@ -2698,20 +2691,14 @@ RelationBuildLocalRelation(const char *relname,
 
 	RelationInitPhysicalAddr(rel);
 
-	/* materialized view not initially scannable */
-	if (relkind == RELKIND_MATVIEW)
-		rel->rd_ispopulated = false;
-	else
-		rel->rd_ispopulated = true;
-
 	/*
 	 * Okay to insert into the relcache hash tables.
 	 */
 	RelationCacheInsert(rel);
 
 	/*
-	 * Flag relation as needing eoxact cleanup (to clear rd_createSubid).
-	 * We can't do this before storing relid in it.
+	 * Flag relation as needing eoxact cleanup (to clear rd_createSubid). We
+	 * can't do this before storing relid in it.
 	 */
 	EOXactListAdd(rel);
 
@@ -3329,7 +3316,7 @@ AttrDefaultFetch(Relation relation)
 
 	adrel = heap_open(AttrDefaultRelationId, AccessShareLock);
 	adscan = systable_beginscan(adrel, AttrDefaultIndexId, true,
-								SnapshotNow, 1, &skey);
+								NULL, 1, &skey);
 	found = 0;
 
 	while (HeapTupleIsValid(htup = systable_getnext(adscan)))
@@ -3396,7 +3383,7 @@ CheckConstraintFetch(Relation relation)
 
 	conrel = heap_open(ConstraintRelationId, AccessShareLock);
 	conscan = systable_beginscan(conrel, ConstraintRelidIndexId, true,
-								 SnapshotNow, 1, skey);
+								 NULL, 1, skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(conscan)))
 	{
@@ -3499,7 +3486,7 @@ RelationGetIndexList(Relation relation)
 
 	indrel = heap_open(IndexRelationId, AccessShareLock);
 	indscan = systable_beginscan(indrel, IndexIndrelidIndexId, true,
-								 SnapshotNow, 1, &skey);
+								 NULL, 1, &skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
@@ -3858,8 +3845,8 @@ RelationGetIndexAttrBitmap(Relation relation, bool keyAttrs)
 
 		/* Can this index be referenced by a foreign key? */
 		isKey = indexInfo->ii_Unique &&
-				indexInfo->ii_Expressions == NIL &&
-				indexInfo->ii_Predicate == NIL;
+			indexInfo->ii_Expressions == NIL &&
+			indexInfo->ii_Predicate == NIL;
 
 		/* Collect simple attribute references */
 		for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
@@ -3872,7 +3859,7 @@ RelationGetIndexAttrBitmap(Relation relation, bool keyAttrs)
 							   attrnum - FirstLowInvalidHeapAttributeNumber);
 				if (isKey)
 					uindexattrs = bms_add_member(uindexattrs,
-												 attrnum - FirstLowInvalidHeapAttributeNumber);
+							   attrnum - FirstLowInvalidHeapAttributeNumber);
 			}
 		}
 
@@ -3950,7 +3937,7 @@ RelationGetExclusionInfo(Relation indexRelation,
 
 	conrel = heap_open(ConstraintRelationId, AccessShareLock);
 	conscan = systable_beginscan(conrel, ConstraintRelidIndexId, true,
-								 SnapshotNow, 1, skey);
+								 NULL, 1, skey);
 	found = false;
 
 	while (HeapTupleIsValid(htup = systable_getnext(conscan)))
@@ -4041,7 +4028,7 @@ errtable(Relation rel)
 					   get_namespace_name(RelationGetNamespace(rel)));
 	err_generic_string(PG_DIAG_TABLE_NAME, RelationGetRelationName(rel));
 
-	return 0;			/* return value does not matter */
+	return 0;					/* return value does not matter */
 }
 
 /*
@@ -4072,7 +4059,7 @@ errtablecol(Relation rel, int attnum)
  * given directly rather than extracted from the relation's catalog data.
  *
  * Don't use this directly unless errtablecol() is inconvenient for some
- * reason.  This might possibly be needed during intermediate states in ALTER
+ * reason.	This might possibly be needed during intermediate states in ALTER
  * TABLE, for instance.
  */
 int
@@ -4081,7 +4068,7 @@ errtablecolname(Relation rel, const char *colname)
 	errtable(rel);
 	err_generic_string(PG_DIAG_COLUMN_NAME, colname);
 
-	return 0;			/* return value does not matter */
+	return 0;					/* return value does not matter */
 }
 
 /*
@@ -4094,7 +4081,7 @@ errtableconstraint(Relation rel, const char *conname)
 	errtable(rel);
 	err_generic_string(PG_DIAG_CONSTRAINT_NAME, conname);
 
-	return 0;			/* return value does not matter */
+	return 0;					/* return value does not matter */
 }
 
 
@@ -4448,11 +4435,6 @@ load_relcache_init_file(bool shared)
 		 */
 		RelationInitLockInfo(rel);
 		RelationInitPhysicalAddr(rel);
-		if (rel->rd_rel->relkind == RELKIND_MATVIEW &&
-			heap_is_matview_init_state(rel))
-			rel->rd_ispopulated = false;
-		else
-			rel->rd_ispopulated = true;
 	}
 
 	/*

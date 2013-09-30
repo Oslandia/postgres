@@ -15,10 +15,10 @@ SELECT * FROM tv ORDER BY type;
 EXPLAIN (costs off)
   CREATE MATERIALIZED VIEW tm AS SELECT type, sum(amt) AS totamt FROM t GROUP BY type WITH NO DATA;
 CREATE MATERIALIZED VIEW tm AS SELECT type, sum(amt) AS totamt FROM t GROUP BY type WITH NO DATA;
-SELECT pg_relation_is_scannable('tm'::regclass);
+SELECT relispopulated FROM pg_class WHERE oid = 'tm'::regclass;
 SELECT * FROM tm;
 REFRESH MATERIALIZED VIEW tm;
-SELECT pg_relation_is_scannable('tm'::regclass);
+SELECT relispopulated FROM pg_class WHERE oid = 'tm'::regclass;
 CREATE UNIQUE INDEX tm_type ON tm (type);
 SELECT * FROM tm;
 
@@ -29,6 +29,8 @@ CREATE MATERIALIZED VIEW tvm AS SELECT * FROM tv ORDER BY type;
 SELECT * FROM tvm;
 CREATE MATERIALIZED VIEW tmm AS SELECT sum(totamt) AS grandtot FROM tm;
 CREATE MATERIALIZED VIEW tvmm AS SELECT sum(totamt) AS grandtot FROM tvm;
+CREATE UNIQUE INDEX tvmm_expr ON tvmm ((grandtot > 0));
+CREATE UNIQUE INDEX tvmm_pred ON tvmm (grandtot) WHERE grandtot < 0;
 CREATE VIEW tvv AS SELECT sum(totamt) AS grandtot FROM tv;
 EXPLAIN (costs off)
   CREATE MATERIALIZED VIEW tvvm AS SELECT * FROM tvv;
@@ -57,7 +59,7 @@ INSERT INTO t VALUES (6, 'z', 13);
 -- confirm pre- and post-refresh contents of fairly simple materialized views
 SELECT * FROM tm ORDER BY type;
 SELECT * FROM tvm ORDER BY type;
-REFRESH MATERIALIZED VIEW tm;
+REFRESH MATERIALIZED VIEW CONCURRENTLY tm;
 REFRESH MATERIALIZED VIEW tvm;
 SELECT * FROM tm ORDER BY type;
 SELECT * FROM tvm ORDER BY type;
@@ -74,6 +76,7 @@ SELECT * FROM tmm;
 SELECT * FROM tvmm;
 SELECT * FROM tvvm;
 REFRESH MATERIALIZED VIEW tmm;
+REFRESH MATERIALIZED VIEW CONCURRENTLY tvmm;
 REFRESH MATERIALIZED VIEW tvmm;
 REFRESH MATERIALIZED VIEW tvvm;
 EXPLAIN (costs off)
@@ -87,27 +90,16 @@ SELECT * FROM tvmm;
 SELECT * FROM tvvm;
 
 -- test diemv when the mv does not exist
-DROP MATERIALIZED VIEW IF EXISTS tum;
+DROP MATERIALIZED VIEW IF EXISTS no_such_mv;
 
--- make sure that an unlogged materialized view works (in the absence of a crash)
-CREATE UNLOGGED MATERIALIZED VIEW tum AS SELECT type, sum(amt) AS totamt FROM t GROUP BY type WITH NO DATA;
-SELECT pg_relation_is_scannable('tum'::regclass);
-SELECT * FROM tum;
-REFRESH MATERIALIZED VIEW tum;
-SELECT pg_relation_is_scannable('tum'::regclass);
-SELECT * FROM tum;
-REFRESH MATERIALIZED VIEW tum WITH NO DATA;
-SELECT pg_relation_is_scannable('tum'::regclass);
-SELECT * FROM tum;
-REFRESH MATERIALIZED VIEW tum WITH DATA;
-SELECT pg_relation_is_scannable('tum'::regclass);
-SELECT * FROM tum;
+-- make sure invalid comination of options is prohibited
+REFRESH MATERIALIZED VIEW CONCURRENTLY tvmm WITH NO DATA;
+
+-- no tuple locks on materialized views
+SELECT * FROM tvvm FOR SHARE;
 
 -- test join of mv and view
 SELECT type, m.totamt AS mtot, v.totamt AS vtot FROM tm m LEFT JOIN tv v USING (type) ORDER BY type;
-
--- test diemv when the mv does exist
-DROP MATERIALIZED VIEW IF EXISTS tum;
 
 -- make sure that dependencies are reported properly when they block the drop
 DROP TABLE t;
@@ -126,6 +118,39 @@ CREATE VIEW v_test2 AS SELECT moo, 2*moo FROM v_test1 UNION ALL SELECT moo, 3*mo
 CREATE MATERIALIZED VIEW mv_test2 AS SELECT moo, 2*moo FROM v_test2 UNION ALL SELECT moo, 3*moo FROM v_test2;
 \d+ mv_test2
 CREATE MATERIALIZED VIEW mv_test3 AS SELECT * FROM mv_test2 WHERE moo = 12345;
-SELECT pg_relation_is_scannable('mv_test3'::regclass);
+SELECT relispopulated FROM pg_class WHERE oid = 'mv_test3'::regclass;
 
 DROP VIEW v_test1 CASCADE;
+
+-- test that vacuum does not make empty matview look unpopulated
+CREATE TABLE hoge (i int);
+INSERT INTO hoge VALUES (generate_series(1,100000));
+CREATE MATERIALIZED VIEW hogeview AS SELECT * FROM hoge WHERE i % 2 = 0;
+CREATE INDEX hogeviewidx ON hogeview (i);
+DELETE FROM hoge;
+REFRESH MATERIALIZED VIEW hogeview;
+SELECT * FROM hogeview WHERE i < 10;
+VACUUM ANALYZE;
+SELECT * FROM hogeview WHERE i < 10;
+DROP TABLE hoge CASCADE;
+
+-- test that duplicate values on unique index prevent refresh
+CREATE TABLE foo(a, b) AS VALUES(1, 10);
+CREATE MATERIALIZED VIEW mv AS SELECT * FROM foo;
+CREATE UNIQUE INDEX ON mv(a);
+INSERT INTO foo SELECT * FROM foo;
+REFRESH MATERIALIZED VIEW mv;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+DROP TABLE foo CASCADE;
+
+-- make sure that all indexes covered by unique indexes works
+CREATE TABLE foo(a, b, c) AS VALUES(1, 2, 3);
+CREATE MATERIALIZED VIEW mv AS SELECT * FROM foo;
+CREATE UNIQUE INDEX ON mv (a);
+CREATE UNIQUE INDEX ON mv (b);
+CREATE UNIQUE INDEX on mv (c);
+INSERT INTO foo VALUES(2, 3, 4);
+INSERT INTO foo VALUES(3, 4, 5);
+REFRESH MATERIALIZED VIEW mv;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+DROP TABLE foo CASCADE;

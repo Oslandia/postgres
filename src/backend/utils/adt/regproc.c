@@ -104,7 +104,7 @@ regprocin(PG_FUNCTION_ARGS)
 
 		hdesc = heap_open(ProcedureRelationId, AccessShareLock);
 		sysscan = systable_beginscan(hdesc, ProcedureNameArgsNspIndexId, true,
-									 SnapshotNow, 1, skey);
+									 NULL, 1, skey);
 
 		while (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
 		{
@@ -319,7 +319,7 @@ format_procedure_qualified(Oid procedure_oid)
  * Routine to produce regprocedure names; see format_procedure above.
  *
  * force_qualify says whether to schema-qualify; if true, the name is always
- * qualified regardless of search_path visibility.  Otherwise the name is only
+ * qualified regardless of search_path visibility.	Otherwise the name is only
  * qualified if the function is not in path.
  */
 static char *
@@ -472,7 +472,7 @@ regoperin(PG_FUNCTION_ARGS)
 
 		hdesc = heap_open(OperatorRelationId, AccessShareLock);
 		sysscan = systable_beginscan(hdesc, OperatorNameNspIndexId, true,
-									 SnapshotNow, 1, skey);
+									 NULL, 1, skey);
 
 		while (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
 		{
@@ -698,7 +698,8 @@ format_operator_internal(Oid operator_oid, bool force_qualify)
 
 		/*
 		 * Would this oper be found (given the right args) by regoperatorin?
-		 * If not, or if caller explicitely requests it, we need to qualify it.
+		 * If not, or if caller explicitely requests it, we need to qualify
+		 * it.
 		 */
 		if (force_qualify || !OperatorIsVisible(operator_oid))
 		{
@@ -842,7 +843,7 @@ regclassin(PG_FUNCTION_ARGS)
 
 		hdesc = heap_open(RelationRelationId, AccessShareLock);
 		sysscan = systable_beginscan(hdesc, ClassNameNspIndexId, true,
-									 SnapshotNow, 1, skey);
+									 NULL, 1, skey);
 
 		if (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
 			result = HeapTupleGetOid(tuple);
@@ -1006,7 +1007,7 @@ regtypein(PG_FUNCTION_ARGS)
 
 		hdesc = heap_open(TypeRelationId, AccessShareLock);
 		sysscan = systable_beginscan(hdesc, TypeNameNspIndexId, true,
-									 SnapshotNow, 1, skey);
+									 NULL, 1, skey);
 
 		if (HeapTupleIsValid(tuple = systable_getnext(sysscan)))
 			result = HeapTupleGetOid(tuple);

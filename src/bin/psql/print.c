@@ -1171,7 +1171,7 @@ print_aligned_vertical(const printTableContent *cont, FILE *fout)
 	if (cont->cells[0] == NULL && cont->opt->start_table &&
 		cont->opt->stop_table)
 	{
-		if (!opt_tuples_only)
+		if (!opt_tuples_only && cont->opt->default_footer)
 			fprintf(fout, _("(No rows)\n"));
 		return;
 	}
@@ -1747,10 +1747,10 @@ print_latex_longtable_text(const printTableContent *cont, FILE *fout)
 				{
 					fputs("p{", fout);
 					fwrite(next_opt_table_attr_char, strcspn(next_opt_table_attr_char,
-						   LONGTABLE_WHITESPACE), 1, fout);
+											 LONGTABLE_WHITESPACE), 1, fout);
 					last_opt_table_attr_char = next_opt_table_attr_char;
 					next_opt_table_attr_char += strcspn(next_opt_table_attr_char,
-													    LONGTABLE_WHITESPACE);
+														LONGTABLE_WHITESPACE);
 					fputs("\\textwidth}", fout);
 				}
 				/* use previous value */
@@ -1758,7 +1758,7 @@ print_latex_longtable_text(const printTableContent *cont, FILE *fout)
 				{
 					fputs("p{", fout);
 					fwrite(last_opt_table_attr_char, strcspn(last_opt_table_attr_char,
-						   LONGTABLE_WHITESPACE), 1, fout);
+											 LONGTABLE_WHITESPACE), 1, fout);
 					fputs("\\textwidth}", fout);
 				}
 				else

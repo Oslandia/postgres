@@ -105,6 +105,7 @@
 
 #define KB_PER_MB (1024)
 #define KB_PER_GB (1024*1024)
+#define KB_PER_TB (1024*1024*1024)
 
 #define MS_PER_S 1000
 #define S_PER_MIN 60
@@ -189,6 +190,7 @@ static const char *show_tcp_keepalives_idle(void);
 static const char *show_tcp_keepalives_interval(void);
 static const char *show_tcp_keepalives_count(void);
 static bool check_maxconnections(int *newval, void **extra, GucSource source);
+static bool check_max_worker_processes(int *newval, void **extra, GucSource source);
 static bool check_autovacuum_max_workers(int *newval, void **extra, GucSource source);
 static bool check_effective_io_concurrency(int *newval, void **extra, GucSource source);
 static void assign_effective_io_concurrency(int newval, void *extra);
@@ -442,8 +444,6 @@ int			tcp_keepalives_count;
  * cases provide the value for SHOW to display.  The real state is elsewhere
  * and is kept in sync by assign_hooks.
  */
-static char *log_destination_string;
-
 static char *syslog_ident_str;
 static bool phony_autocommit;
 static bool session_auth_is_superuser;
@@ -466,6 +466,7 @@ static int	max_identifier_length;
 static int	block_size;
 static int	segment_size;
 static int	wal_block_size;
+static bool	data_checksums;
 static int	wal_segment_size;
 static bool integer_datetimes;
 static int	effective_io_concurrency;
@@ -589,6 +590,8 @@ const char *const config_group_names[] =
 	gettext_noop("Client Connection Defaults / Statement Behavior"),
 	/* CLIENT_CONN_LOCALE */
 	gettext_noop("Client Connection Defaults / Locale and Formatting"),
+	/* CLIENT_CONN_PRELOAD */
+	gettext_noop("Client Connection Defaults / Shared Library Preloading"),
 	/* CLIENT_CONN_OTHER */
 	gettext_noop("Client Connection Defaults / Other Defaults"),
 	/* LOCK_MANAGEMENT */
@@ -814,8 +817,8 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("Detection of a checksum failure normally causes PostgreSQL to "
 				"report an error, aborting the current transaction. Setting "
 						 "ignore_checksum_failure to true causes the system to ignore the failure "
-						 "(but still report a warning), and continue processing. This "
-						 "behavior could cause crashes or other serious problems. Only "
+			   "(but still report a warning), and continue processing. This "
+			  "behavior could cause crashes or other serious problems. Only "
 						 "has an effect if checksums are enabled."),
 			GUC_NOT_IN_SAMPLE
 		},
@@ -995,7 +998,7 @@ static struct config_bool ConfigureNamesBool[] =
 #ifdef BTREE_BUILD_STATS
 	{
 		{"log_btree_build_stats", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Logs system resource usage statistics (memory and CPU) on various B-tree operations."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -1069,7 +1072,7 @@ static struct config_bool ConfigureNamesBool[] =
 #ifdef LOCK_DEBUG
 	{
 		{"trace_locks", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Emits information about lock usage."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -1079,7 +1082,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 	{
 		{"trace_userlocks", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Emits information about user lock usage."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -1089,7 +1092,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 	{
 		{"trace_lwlocks", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Emits information about lightweight lock usage."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -1099,7 +1102,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 	{
 		{"debug_deadlocks", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Dumps information about all current locks when a deadlock timeout occurs."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -1455,6 +1458,17 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"data_checksums", PGC_INTERNAL, PRESET_OPTIONS,
+			gettext_noop("Shows whether data checksums are turned on for this cluster"),
+			NULL,
+			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
+		},
+		&data_checksums,
+		false,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
@@ -1603,7 +1617,7 @@ static struct config_int ConfigureNamesInt[] =
 
 	{
 		{"wal_receiver_timeout", PGC_SIGHUP, REPLICATION_STANDBY,
-			gettext_noop("Sets the maximum wait time to receive data from master."),
+			gettext_noop("Sets the maximum wait time to receive data from the primary."),
 			NULL,
 			GUC_UNIT_MS
 		},
@@ -1846,8 +1860,8 @@ static struct config_int ConfigureNamesInt[] =
 #ifdef LOCK_DEBUG
 	{
 		{"trace_lock_oidmin", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
-			NULL,
+			gettext_noop("Sets the minimum OID of tables for tracking locks."),
+			gettext_noop("Is used to avoid output on system tables."),
 			GUC_NOT_IN_SAMPLE
 		},
 		&Trace_lock_oidmin,
@@ -1856,7 +1870,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 	{
 		{"trace_lock_table", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("No description available."),
+			gettext_noop("Sets the OID of the table with unconditionally lock tracing."),
 			NULL,
 			GUC_NOT_IN_SAMPLE
 		},
@@ -2036,6 +2050,17 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"xloginsert_slots", PGC_POSTMASTER, WAL_SETTINGS,
+			gettext_noop("Sets the number of slots for concurrent xlog insertions."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&num_xloginsert_slots,
+		8, 1, 1000,
+		NULL, NULL, NULL
+	},
+
+	{
 		/* see max_connections */
 		{"max_wal_senders", PGC_POSTMASTER, REPLICATION_SENDING,
 			gettext_noop("Sets the maximum number of simultaneously running WAL sender processes."),
@@ -2155,6 +2180,18 @@ static struct config_int ConfigureNamesInt[] =
 		0, 0, 0,
 #endif
 		check_effective_io_concurrency, assign_effective_io_concurrency, NULL
+	},
+
+	{
+		{"max_worker_processes",
+			PGC_POSTMASTER,
+			RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Maximum number of concurrent worker processes."),
+			NULL,
+		},
+		&max_worker_processes,
+		8, 1, MAX_BACKENDS,
+		check_max_worker_processes, NULL, NULL
 	},
 
 	{
@@ -2745,7 +2782,18 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"shared_preload_libraries", PGC_POSTMASTER, RESOURCES_KERNEL,
+		{"session_preload_libraries", PGC_SUSET, CLIENT_CONN_PRELOAD,
+			gettext_noop("Lists shared libraries to preload into each backend."),
+			NULL,
+			GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY
+		},
+		&session_preload_libraries_string,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"shared_preload_libraries", PGC_POSTMASTER, CLIENT_CONN_PRELOAD,
 			gettext_noop("Lists shared libraries to preload into server."),
 			NULL,
 			GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY
@@ -2756,8 +2804,8 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"local_preload_libraries", PGC_BACKEND, CLIENT_CONN_OTHER,
-			gettext_noop("Lists shared libraries to preload into each backend."),
+		{"local_preload_libraries", PGC_BACKEND, CLIENT_CONN_PRELOAD,
+			gettext_noop("Lists unprivileged shared libraries to preload into each backend."),
 			NULL,
 			GUC_LIST_INPUT | GUC_LIST_QUOTE
 		},
@@ -2833,7 +2881,7 @@ static struct config_string ConfigureNamesString[] =
 						 "depending on the platform."),
 			GUC_LIST_INPUT
 		},
-		&log_destination_string,
+		&Log_destination_string,
 		"stderr",
 		check_log_destination, assign_log_destination, NULL
 	},
@@ -4837,7 +4885,7 @@ parse_int(const char *value, int *result, int flags, const char **hintmsg)
 		{
 			/* Set hint for use if no match or trailing garbage */
 			if (hintmsg)
-				*hintmsg = gettext_noop("Valid units for this parameter are \"kB\", \"MB\", and \"GB\".");
+				*hintmsg = gettext_noop("Valid units for this parameter are \"kB\", \"MB\", \"GB\", and \"TB\".");
 
 #if BLCKSZ < 1024 || BLCKSZ > (1024*1024)
 #error BLCKSZ must be between 1KB and 1MB
@@ -4888,6 +4936,22 @@ parse_int(const char *value, int *result, int flags, const char **hintmsg)
 						break;
 					case GUC_UNIT_XBLOCKS:
 						val *= KB_PER_GB / (XLOG_BLCKSZ / 1024);
+						break;
+				}
+			}
+			else if (strncmp(endptr, "TB", 2) == 0)
+			{
+				endptr += 2;
+				switch (flags & GUC_UNIT_MEMORY)
+				{
+					case GUC_UNIT_KB:
+						val *= KB_PER_TB;
+						break;
+					case GUC_UNIT_BLOCKS:
+						val *= KB_PER_TB / (BLCKSZ / 1024);
+						break;
+					case GUC_UNIT_XBLOCKS:
+						val *= KB_PER_TB / (XLOG_BLCKSZ / 1024);
 						break;
 				}
 			}
@@ -7384,7 +7448,12 @@ _ShowOption(struct config_generic * record, bool use_units)
 								break;
 						}
 
-						if (result % KB_PER_GB == 0)
+						if (result % KB_PER_TB == 0)
+						{
+							result /= KB_PER_TB;
+							unit = "TB";
+						}
+						else if (result % KB_PER_GB == 0)
 						{
 							result /= KB_PER_GB;
 							unit = "GB";
@@ -8645,8 +8714,8 @@ show_tcp_keepalives_count(void)
 static bool
 check_maxconnections(int *newval, void **extra, GucSource source)
 {
-	if (*newval + GetNumShmemAttachedBgworkers() + autovacuum_max_workers + 1 >
-		MAX_BACKENDS)
+	if (*newval + autovacuum_max_workers + 1 +
+		max_worker_processes > MAX_BACKENDS)
 		return false;
 	return true;
 }
@@ -8654,8 +8723,15 @@ check_maxconnections(int *newval, void **extra, GucSource source)
 static bool
 check_autovacuum_max_workers(int *newval, void **extra, GucSource source)
 {
-	if (MaxConnections + *newval + 1 + GetNumShmemAttachedBgworkers() >
-		MAX_BACKENDS)
+	if (MaxConnections + *newval + 1 + max_worker_processes > MAX_BACKENDS)
+		return false;
+	return true;
+}
+
+static bool
+check_max_worker_processes(int *newval, void **extra, GucSource source)
+{
+	if (MaxConnections + autovacuum_max_workers + 1 + *newval > MAX_BACKENDS)
 		return false;
 	return true;
 }

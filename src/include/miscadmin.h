@@ -28,6 +28,8 @@
 
 #define PG_BACKEND_VERSIONSTR "postgres (PostgreSQL) " PG_VERSION "\n"
 
+#define InvalidPid				(-1)
+
 
 /*****************************************************************************
  *	  System interrupt and critical section handling
@@ -141,6 +143,7 @@ extern PGDLLIMPORT char *DataDir;
 extern PGDLLIMPORT int NBuffers;
 extern int	MaxBackends;
 extern int	MaxConnections;
+extern int	max_worker_processes;
 
 extern PGDLLIMPORT int MyProcPid;
 extern PGDLLIMPORT pg_time_t MyStartTime;
@@ -342,7 +345,7 @@ typedef enum ProcessingMode
 
 extern ProcessingMode Mode;
 
-#define IsBootstrapProcessingMode()	(Mode == BootstrapProcessing)
+#define IsBootstrapProcessingMode() (Mode == BootstrapProcessing)
 #define IsInitProcessingMode()		(Mode == InitProcessing)
 #define IsNormalProcessingMode()	(Mode == NormalProcessing)
 
@@ -358,7 +361,7 @@ extern ProcessingMode Mode;
 
 
 /*
- * Auxiliary-process type identifiers.  These used to be in bootstrap.h
+ * Auxiliary-process type identifiers.	These used to be in bootstrap.h
  * but it seems saner to have them here, with the ProcessingMode stuff.
  * The MyAuxProcType global is defined and set in bootstrap.c.
  */
@@ -381,7 +384,7 @@ extern AuxProcType MyAuxProcType;
 
 #define AmBootstrapProcess()		(MyAuxProcType == BootstrapProcess)
 #define AmStartupProcess()			(MyAuxProcType == StartupProcess)
-#define AmBackgroundWriterProcess()	(MyAuxProcType == BgWriterProcess)
+#define AmBackgroundWriterProcess() (MyAuxProcType == BgWriterProcess)
 #define AmCheckpointerProcess()		(MyAuxProcType == CheckpointerProcess)
 #define AmWalWriterProcess()		(MyAuxProcType == WalWriterProcess)
 #define AmWalReceiverProcess()		(MyAuxProcType == WalReceiverProcess)
@@ -402,6 +405,7 @@ extern void BaseInit(void);
 /* in utils/init/miscinit.c */
 extern bool IgnoreSystemIndexes;
 extern PGDLLIMPORT bool process_shared_preload_libraries_in_progress;
+extern char *session_preload_libraries_string;
 extern char *shared_preload_libraries_string;
 extern char *local_preload_libraries_string;
 
@@ -437,7 +441,7 @@ extern void TouchSocketLockFiles(void);
 extern void AddToDataDirLockFile(int target_line, const char *str);
 extern void ValidatePgVersion(const char *path);
 extern void process_shared_preload_libraries(void);
-extern void process_local_preload_libraries(void);
+extern void process_session_preload_libraries(void);
 extern void pg_bindtextdomain(const char *domain);
 extern bool has_rolreplication(Oid roleid);
 

@@ -1973,7 +1973,7 @@ dblink_fdw_validator(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_OUT_OF_MEMORY),
 					 errmsg("out of memory"),
-					 errdetail("could not get libpq's default connection options")));
+			 errdetail("could not get libpq's default connection options")));
 	}
 
 	/* Validate each supplied option. */
@@ -1984,9 +1984,9 @@ dblink_fdw_validator(PG_FUNCTION_ARGS)
 		if (!is_valid_dblink_option(options, def->defname, context))
 		{
 			/*
-			 * Unknown option, or invalid option for the context specified,
-			 * so complain about it.  Provide a hint with list of valid
-			 * options for the context.
+			 * Unknown option, or invalid option for the context specified, so
+			 * complain about it.  Provide a hint with list of valid options
+			 * for the context.
 			 */
 			StringInfoData buf;
 			const PQconninfoOption *opt;
@@ -2046,7 +2046,7 @@ get_pkey_attnames(Relation rel, int16 *numatts)
 				ObjectIdGetDatum(RelationGetRelid(rel)));
 
 	scan = systable_beginscan(indexRelation, IndexIndrelidIndexId, true,
-							  SnapshotNow, 1, &skey);
+							  NULL, 1, &skey);
 
 	while (HeapTupleIsValid(indexTuple = systable_getnext(scan)))
 	{

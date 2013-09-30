@@ -203,8 +203,8 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 	inhinfo = getInherits(fout, &numInherits);
 
 	if (g_verbose)
-		write_msg(NULL, "reading rewrite rules\n");
-	getRules(fout, &numRules);
+		write_msg(NULL, "reading event triggers\n");
+	getEventTriggers(fout, &numEventTriggers);
 
 	/*
 	 * Identify extension member objects and mark them as not to be dumped.
@@ -241,8 +241,8 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 	getTriggers(fout, tblinfo, numTables);
 
 	if (g_verbose)
-		write_msg(NULL, "reading event triggers\n");
-	getEventTriggers(fout, &numEventTriggers);
+		write_msg(NULL, "reading rewrite rules\n");
+	getRules(fout, &numRules);
 
 	*numTablesPtr = numTables;
 	return tblinfo;
@@ -269,7 +269,7 @@ flagInhTables(TableInfo *tblinfo, int numTables,
 
 	for (i = 0; i < numTables; i++)
 	{
-		/* Sequences and views never have parents */
+		/* Some kinds never have parents */
 		if (tblinfo[i].relkind == RELKIND_SEQUENCE ||
 			tblinfo[i].relkind == RELKIND_VIEW ||
 			tblinfo[i].relkind == RELKIND_MATVIEW)
@@ -315,7 +315,7 @@ flagInhAttrs(TableInfo *tblinfo, int numTables)
 		int			numParents;
 		TableInfo **parents;
 
-		/* Sequences and views never have parents */
+		/* Some kinds never have parents */
 		if (tbinfo->relkind == RELKIND_SEQUENCE ||
 			tbinfo->relkind == RELKIND_VIEW ||
 			tbinfo->relkind == RELKIND_MATVIEW)

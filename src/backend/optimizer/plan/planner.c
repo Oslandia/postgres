@@ -39,6 +39,7 @@
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/rel.h"
+#include "utils/selfuncs.h"
 
 
 /* GUC parameter */
@@ -52,14 +53,21 @@ planner_hook_type planner_hook = NULL;
 #define EXPRKIND_QUAL			0
 #define EXPRKIND_TARGET			1
 #define EXPRKIND_RTFUNC			2
-#define EXPRKIND_RTFUNC_LATERAL	3
+#define EXPRKIND_RTFUNC_LATERAL 3
 #define EXPRKIND_VALUES			4
-#define EXPRKIND_VALUES_LATERAL	5
+#define EXPRKIND_VALUES_LATERAL 5
 #define EXPRKIND_LIMIT			6
 #define EXPRKIND_APPINFO		7
 #define EXPRKIND_PHV			8
 
+/* Passthrough data for standard_qp_callback */
+typedef struct
+{
+	List	   *tlist;			/* preprocessed query targetlist */
+	List	   *activeWindows;	/* active windows, if any */
+} standard_qp_extra;
 
+/* Local functions */
 static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
 static void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 static Plan *inheritance_planner(PlannerInfo *root);
@@ -70,6 +78,7 @@ static double preprocess_limit(PlannerInfo *root,
 				 int64 *offset_est, int64 *count_est);
 static bool limit_needed(Query *parse);
 static void preprocess_groupclause(PlannerInfo *root);
+static void standard_qp_callback(PlannerInfo *root, void *extra);
 static bool choose_hashed_grouping(PlannerInfo *root,
 					   double tuple_fraction, double limit_tuples,
 					   double path_rows, int path_width,
@@ -94,7 +103,7 @@ static List *select_active_windows(PlannerInfo *root, WindowFuncLists *wflists);
 static List *make_windowInputTargetList(PlannerInfo *root,
 						   List *tlist, List *activeWindows);
 static List *make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
-						 List *tlist, bool canonicalize);
+						 List *tlist);
 static void get_column_info_for_window(PlannerInfo *root, WindowClause *wc,
 						   List *tlist,
 						   int numSortCols, AttrNumber *sortColIdx,
@@ -286,6 +295,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	int			num_old_subplans = list_length(glob->subplans);
 	PlannerInfo *root;
 	Plan	   *plan;
+	List	   *newWithCheckOptions;
 	List	   *newHaving;
 	bool		hasOuterJoins;
 	ListCell   *l;
@@ -412,6 +422,18 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	parse->targetList = (List *)
 		preprocess_expression(root, (Node *) parse->targetList,
 							  EXPRKIND_TARGET);
+
+	newWithCheckOptions = NIL;
+	foreach(l, parse->withCheckOptions)
+	{
+		WithCheckOption *wco = (WithCheckOption *) lfirst(l);
+
+		wco->qual = preprocess_expression(root, wco->qual,
+										  EXPRKIND_QUAL);
+		if (wco->qual != NULL)
+			newWithCheckOptions = lappend(newWithCheckOptions, wco);
+	}
+	parse->withCheckOptions = newWithCheckOptions;
 
 	parse->returningList = (List *)
 		preprocess_expression(root, (Node *) parse->returningList,
@@ -551,21 +573,28 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		/* If it's not SELECT, we need a ModifyTable node */
 		if (parse->commandType != CMD_SELECT)
 		{
+			List	   *withCheckOptionLists;
 			List	   *returningLists;
 			List	   *rowMarks;
 
 			/*
-			 * Set up the RETURNING list-of-lists, if needed.
+			 * Set up the WITH CHECK OPTION and RETURNING lists-of-lists, if
+			 * needed.
 			 */
+			if (parse->withCheckOptions)
+				withCheckOptionLists = list_make1(parse->withCheckOptions);
+			else
+				withCheckOptionLists = NIL;
+
 			if (parse->returningList)
 				returningLists = list_make1(parse->returningList);
 			else
 				returningLists = NIL;
 
 			/*
-			 * If there was a FOR [KEY] UPDATE/SHARE clause, the LockRows node will
-			 * have dealt with fetching non-locked marked rows, else we need
-			 * to have ModifyTable do that.
+			 * If there was a FOR [KEY] UPDATE/SHARE clause, the LockRows node
+			 * will have dealt with fetching non-locked marked rows, else we
+			 * need to have ModifyTable do that.
 			 */
 			if (parse->rowMarks)
 				rowMarks = NIL;
@@ -577,6 +606,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 											 parse->canSetTag,
 									   list_make1_int(parse->resultRelation),
 											 list_make1(plan),
+											 withCheckOptionLists,
 											 returningLists,
 											 rowMarks,
 											 SS_assign_special_param(root));
@@ -762,6 +792,7 @@ inheritance_planner(PlannerInfo *root)
 	RelOptInfo **save_rel_array = NULL;
 	List	   *subplans = NIL;
 	List	   *resultRelations = NIL;
+	List	   *withCheckOptionLists = NIL;
 	List	   *returningLists = NIL;
 	List	   *rowMarks;
 	ListCell   *lc;
@@ -922,7 +953,10 @@ inheritance_planner(PlannerInfo *root)
 		/* Build list of target-relation RT indexes */
 		resultRelations = lappend_int(resultRelations, appinfo->child_relid);
 
-		/* Build list of per-relation RETURNING targetlists */
+		/* Build lists of per-relation WCO and RETURNING targetlists */
+		if (parse->withCheckOptions)
+			withCheckOptionLists = lappend(withCheckOptionLists,
+										   subroot.parse->withCheckOptions);
 		if (parse->returningList)
 			returningLists = lappend(returningLists,
 									 subroot.parse->returningList);
@@ -956,8 +990,8 @@ inheritance_planner(PlannerInfo *root)
 	root->simple_rel_array = save_rel_array;
 
 	/*
-	 * If there was a FOR [KEY] UPDATE/SHARE clause, the LockRows node will have
-	 * dealt with fetching non-locked marked rows, else we need to have
+	 * If there was a FOR [KEY] UPDATE/SHARE clause, the LockRows node will
+	 * have dealt with fetching non-locked marked rows, else we need to have
 	 * ModifyTable do that.
 	 */
 	if (parse->rowMarks)
@@ -971,6 +1005,7 @@ inheritance_planner(PlannerInfo *root)
 									 parse->canSetTag,
 									 resultRelations,
 									 subplans,
+									 withCheckOptionLists,
 									 returningLists,
 									 rowMarks,
 									 SS_assign_special_param(root));
@@ -1052,8 +1087,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 */
 		current_pathkeys = make_pathkeys_for_sortclauses(root,
 														 set_sortclauses,
-													 result_plan->targetlist,
-														 true);
+													result_plan->targetlist);
 
 		/*
 		 * We should not need to call preprocess_targetlist, since we must be
@@ -1068,13 +1102,17 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										tlist);
 
 		/*
-		 * Can't handle FOR [KEY] UPDATE/SHARE here (parser should have checked
-		 * already, but let's make sure).
+		 * Can't handle FOR [KEY] UPDATE/SHARE here (parser should have
+		 * checked already, but let's make sure).
 		 */
 		if (parse->rowMarks)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("row-level locks are not allowed with UNION/INTERSECT/EXCEPT")));
+					 /*------
+					   translator: %s is a SQL row locking clause such as FOR UPDATE */
+					 errmsg("%s is not allowed with UNION/INTERSECT/EXCEPT",
+							LCS_asString(((RowMarkClause *)
+										  linitial(parse->rowMarks))->strength))));
 
 		/*
 		 * Calculate pathkeys that represent result ordering requirements
@@ -1082,16 +1120,16 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		Assert(parse->distinctClause == NIL);
 		root->sort_pathkeys = make_pathkeys_for_sortclauses(root,
 															parse->sortClause,
-															tlist,
-															true);
+															tlist);
 	}
 	else
 	{
 		/* No set operations, do regular planning */
 		List	   *sub_tlist;
-		double		sub_limit_tuples;
 		AttrNumber *groupColIdx = NULL;
 		bool		need_tlist_eval = true;
+		standard_qp_extra qp_extra;
+		RelOptInfo *final_rel;
 		Path	   *cheapest_path;
 		Path	   *sorted_path;
 		Path	   *best_path;
@@ -1167,81 +1205,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			preprocess_minmax_aggregates(root, tlist);
 		}
 
-		/*
-		 * Calculate pathkeys that represent grouping/ordering requirements.
-		 * Stash them in PlannerInfo so that query_planner can canonicalize
-		 * them after EquivalenceClasses have been formed.	The sortClause is
-		 * certainly sort-able, but GROUP BY and DISTINCT might not be, in
-		 * which case we just leave their pathkeys empty.
-		 */
-		if (parse->groupClause &&
-			grouping_is_sortable(parse->groupClause))
-			root->group_pathkeys =
-				make_pathkeys_for_sortclauses(root,
-											  parse->groupClause,
-											  tlist,
-											  false);
-		else
-			root->group_pathkeys = NIL;
-
-		/* We consider only the first (bottom) window in pathkeys logic */
-		if (activeWindows != NIL)
-		{
-			WindowClause *wc = (WindowClause *) linitial(activeWindows);
-
-			root->window_pathkeys = make_pathkeys_for_window(root,
-															 wc,
-															 tlist,
-															 false);
-		}
-		else
-			root->window_pathkeys = NIL;
-
-		if (parse->distinctClause &&
-			grouping_is_sortable(parse->distinctClause))
-			root->distinct_pathkeys =
-				make_pathkeys_for_sortclauses(root,
-											  parse->distinctClause,
-											  tlist,
-											  false);
-		else
-			root->distinct_pathkeys = NIL;
-
-		root->sort_pathkeys =
-			make_pathkeys_for_sortclauses(root,
-										  parse->sortClause,
-										  tlist,
-										  false);
-
-		/*
-		 * Figure out whether we want a sorted result from query_planner.
-		 *
-		 * If we have a sortable GROUP BY clause, then we want a result sorted
-		 * properly for grouping.  Otherwise, if we have window functions to
-		 * evaluate, we try to sort for the first window.  Otherwise, if
-		 * there's a sortable DISTINCT clause that's more rigorous than the
-		 * ORDER BY clause, we try to produce output that's sufficiently well
-		 * sorted for the DISTINCT.  Otherwise, if there is an ORDER BY
-		 * clause, we want to sort by the ORDER BY clause.
-		 *
-		 * Note: if we have both ORDER BY and GROUP BY, and ORDER BY is a
-		 * superset of GROUP BY, it would be tempting to request sort by ORDER
-		 * BY --- but that might just leave us failing to exploit an available
-		 * sort order at all.  Needs more thought.	The choice for DISTINCT
-		 * versus ORDER BY is much easier, since we know that the parser
-		 * ensured that one is a superset of the other.
-		 */
-		if (root->group_pathkeys)
-			root->query_pathkeys = root->group_pathkeys;
-		else if (root->window_pathkeys)
-			root->query_pathkeys = root->window_pathkeys;
-		else if (list_length(root->distinct_pathkeys) >
-				 list_length(root->sort_pathkeys))
-			root->query_pathkeys = root->distinct_pathkeys;
-		else if (root->sort_pathkeys)
-			root->query_pathkeys = root->sort_pathkeys;
-		else
-			root->query_pathkeys = NIL;
+		/* Make tuple_fraction accessible to lower-level routines */
+		root->tuple_fraction = tuple_fraction;
 
 		/*
 		 * Figure out whether there's a hard limit on the number of rows that
@@ -1254,35 +1219,174 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			parse->hasAggs ||
 			parse->hasWindowFuncs ||
 			root->hasHavingQual)
-			sub_limit_tuples = -1.0;
+			root->limit_tuples = -1.0;
 		else
-			sub_limit_tuples = limit_tuples;
+			root->limit_tuples = limit_tuples;
+
+		/* Set up data needed by standard_qp_callback */
+		qp_extra.tlist = tlist;
+		qp_extra.activeWindows = activeWindows;
 
 		/*
 		 * Generate the best unsorted and presorted paths for this Query (but
-		 * note there may not be any presorted path).  query_planner will also
-		 * estimate the number of groups in the query, and canonicalize all
-		 * the pathkeys.
+		 * note there may not be any presorted paths).	We also generate (in
+		 * standard_qp_callback) pathkey representations of the query's sort
+		 * clause, distinct clause, etc.
 		 */
-		query_planner(root, sub_tlist, tuple_fraction, sub_limit_tuples,
-					  &cheapest_path, &sorted_path, &dNumGroups);
+		final_rel = query_planner(root, sub_tlist,
+								  standard_qp_callback, &qp_extra);
 
 		/*
-		 * Extract rowcount and width estimates for possible use in grouping
-		 * decisions.  Beware here of the possibility that
-		 * cheapest_path->parent is NULL (ie, there is no FROM clause).
+		 * Extract rowcount and width estimates for use below.
 		 */
-		if (cheapest_path->parent)
+		path_rows = final_rel->rows;
+		path_width = final_rel->width;
+
+		/*
+		 * If there's grouping going on, estimate the number of result groups.
+		 * We couldn't do this any earlier because it depends on relation size
+		 * estimates that are created within query_planner().
+		 *
+		 * Then convert tuple_fraction to fractional form if it is absolute,
+		 * and if grouping or aggregation is involved, adjust tuple_fraction
+		 * to describe the fraction of the underlying un-aggregated tuples
+		 * that will be fetched.
+		 */
+		dNumGroups = 1;			/* in case not grouping */
+
+		if (parse->groupClause)
 		{
-			path_rows = cheapest_path->parent->rows;
-			path_width = cheapest_path->parent->width;
+			List	   *groupExprs;
+
+			groupExprs = get_sortgrouplist_exprs(parse->groupClause,
+												 parse->targetList);
+			dNumGroups = estimate_num_groups(root, groupExprs, path_rows);
+
+			/*
+			 * In GROUP BY mode, an absolute LIMIT is relative to the number
+			 * of groups not the number of tuples.	If the caller gave us a
+			 * fraction, keep it as-is.  (In both cases, we are effectively
+			 * assuming that all the groups are about the same size.)
+			 */
+			if (tuple_fraction >= 1.0)
+				tuple_fraction /= dNumGroups;
+
+			/*
+			 * If both GROUP BY and ORDER BY are specified, we will need two
+			 * levels of sort --- and, therefore, certainly need to read all
+			 * the tuples --- unless ORDER BY is a subset of GROUP BY.
+			 * Likewise if we have both DISTINCT and GROUP BY, or if we have a
+			 * window specification not compatible with the GROUP BY.
+			 */
+			if (!pathkeys_contained_in(root->sort_pathkeys,
+									   root->group_pathkeys) ||
+				!pathkeys_contained_in(root->distinct_pathkeys,
+									   root->group_pathkeys) ||
+				!pathkeys_contained_in(root->window_pathkeys,
+									   root->group_pathkeys))
+				tuple_fraction = 0.0;
+		}
+		else if (parse->hasAggs || root->hasHavingQual)
+		{
+			/*
+			 * Ungrouped aggregate will certainly want to read all the tuples,
+			 * and it will deliver a single result row (so leave dNumGroups
+			 * set to 1).
+			 */
+			tuple_fraction = 0.0;
+		}
+		else if (parse->distinctClause)
+		{
+			/*
+			 * Since there was no grouping or aggregation, it's reasonable to
+			 * assume the UNIQUE filter has effects comparable to GROUP BY.
+			 * (If DISTINCT is used with grouping, we ignore its effects for
+			 * rowcount estimation purposes; this amounts to assuming the
+			 * grouped rows are distinct already.)
+			 */
+			List	   *distinctExprs;
+
+			distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
+													parse->targetList);
+			dNumGroups = estimate_num_groups(root, distinctExprs, path_rows);
+
+			/*
+			 * Adjust tuple_fraction the same way as for GROUP BY, too.
+			 */
+			if (tuple_fraction >= 1.0)
+				tuple_fraction /= dNumGroups;
 		}
 		else
 		{
-			path_rows = 1;		/* assume non-set result */
-			path_width = 100;	/* arbitrary */
+			/*
+			 * Plain non-grouped, non-aggregated query: an absolute tuple
+			 * fraction can be divided by the number of tuples.
+			 */
+			if (tuple_fraction >= 1.0)
+				tuple_fraction /= path_rows;
 		}
 
+		/*
+		 * Pick out the cheapest-total path as well as the cheapest presorted
+		 * path for the requested pathkeys (if there is one).  We should take
+		 * the tuple fraction into account when selecting the cheapest
+		 * presorted path, but not when selecting the cheapest-total path,
+		 * since if we have to sort then we'll have to fetch all the tuples.
+		 * (But there's a special case: if query_pathkeys is NIL, meaning
+		 * order doesn't matter, then the "cheapest presorted" path will be
+		 * the cheapest overall for the tuple fraction.)
+		 */
+		cheapest_path = final_rel->cheapest_total_path;
+
+		sorted_path =
+			get_cheapest_fractional_path_for_pathkeys(final_rel->pathlist,
+													  root->query_pathkeys,
+													  NULL,
+													  tuple_fraction);
+
+		/* Don't consider same path in both guises; just wastes effort */
+		if (sorted_path == cheapest_path)
+			sorted_path = NULL;
+
+		/*
+		 * Forget about the presorted path if it would be cheaper to sort the
+		 * cheapest-total path.  Here we need consider only the behavior at
+		 * the tuple_fraction point.  Also, limit_tuples is only relevant if
+		 * not grouping/aggregating, so use root->limit_tuples in the
+		 * cost_sort call.
+		 */
+		if (sorted_path)
+		{
+			Path		sort_path;		/* dummy for result of cost_sort */
+
+			if (root->query_pathkeys == NIL ||
+				pathkeys_contained_in(root->query_pathkeys,
+									  cheapest_path->pathkeys))
+			{
+				/* No sort needed for cheapest path */
+				sort_path.startup_cost = cheapest_path->startup_cost;
+				sort_path.total_cost = cheapest_path->total_cost;
+			}
+			else
+			{
+				/* Figure cost for sorting */
+				cost_sort(&sort_path, root, root->query_pathkeys,
+						  cheapest_path->total_cost,
+						  path_rows, path_width,
+						  0.0, work_mem, root->limit_tuples);
+			}
+
+			if (compare_fractional_path_costs(sorted_path, &sort_path,
+											  tuple_fraction) > 0)
+			{
+				/* Presorted path is a loser */
+				sorted_path = NULL;
+			}
+		}
+
+		/*
+		 * Consider whether we want to use hashing instead of sorting.
+		 */
 		if (parse->groupClause)
 		{
 			/*
@@ -1321,7 +1425,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		/*
 		 * Select the best path.  If we are doing hashed grouping, we will
 		 * always read all the input tuples, so use the cheapest-total path.
-		 * Otherwise, trust query_planner's decision about which to use.
+		 * Otherwise, the comparison above is correct.
 		 */
 		if (use_hashed_grouping || use_hashed_distinct || !sorted_path)
 			best_path = cheapest_path;
@@ -1548,7 +1652,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			 * it's not worth trying to avoid it.  In particular, think not to
 			 * skip adding the Result if the initial window_tlist matches the
 			 * top-level plan node's output, because we might change the tlist
-			 * inside the following loop.)  Note that on second and subsequent
+			 * inside the following loop.)	Note that on second and subsequent
 			 * passes through the following loop, the top-level node will be a
 			 * WindowAgg which we know can project; so we only need to check
 			 * once.
@@ -1563,14 +1667,14 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 			/*
 			 * The "base" targetlist for all steps of the windowing process is
-			 * a flat tlist of all Vars and Aggs needed in the result.  (In
+			 * a flat tlist of all Vars and Aggs needed in the result.	(In
 			 * some cases we wouldn't need to propagate all of these all the
 			 * way to the top, since they might only be needed as inputs to
 			 * WindowFuncs.  It's probably not worth trying to optimize that
 			 * though.)  We also add window partitioning and sorting
 			 * expressions to the base tlist, to ensure they're computed only
 			 * once at the bottom of the stack (that's critical for volatile
-			 * functions).  As we climb up the stack, we'll add outputs for
+			 * functions).	As we climb up the stack, we'll add outputs for
 			 * the WindowFuncs computed at each level.
 			 */
 			window_tlist = make_windowInputTargetList(root,
@@ -1579,7 +1683,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 			/*
 			 * The copyObject steps here are needed to ensure that each plan
-			 * node has a separately modifiable tlist.  (XXX wouldn't a
+			 * node has a separately modifiable tlist.	(XXX wouldn't a
 			 * shallow list copy do for that?)
 			 */
 			result_plan->targetlist = (List *) copyObject(window_tlist);
@@ -1597,8 +1701,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 				window_pathkeys = make_pathkeys_for_window(root,
 														   wc,
-														   tlist,
-														   true);
+														   tlist);
 
 				/*
 				 * This is a bit tricky: we build a sort node even if we don't
@@ -1607,7 +1710,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 				 * plan's tlist for any partitioning or ordering columns that
 				 * aren't plain Vars.  (In theory, make_windowInputTargetList
 				 * should have provided all such columns, but let's not assume
-				 * that here.)  Furthermore, this way we can use existing
+				 * that here.)	Furthermore, this way we can use existing
 				 * infrastructure to identify which input columns are the
 				 * interesting ones.
 				 */
@@ -1692,7 +1795,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 * If there was grouping or aggregation, use the current number of
 		 * rows as the estimated number of DISTINCT rows (ie, assume the
 		 * result was already mostly unique).  If not, use the number of
-		 * distinct-groups calculated by query_planner.
+		 * distinct-groups calculated previously.
 		 */
 		if (parse->groupClause || root->hasHavingQual || parse->hasAggs)
 			dNumDistinctRows = result_plan->plan_rows;
@@ -1805,9 +1908,9 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 	}
 
 	/*
-	 * If there is a FOR [KEY] UPDATE/SHARE clause, add the LockRows node. (Note: we
-	 * intentionally test parse->rowMarks not root->rowMarks here. If there
-	 * are only non-locking rowmarks, they should be handled by the
+	 * If there is a FOR [KEY] UPDATE/SHARE clause, add the LockRows node.
+	 * (Note: we intentionally test parse->rowMarks not root->rowMarks here.
+	 * If there are only non-locking rowmarks, they should be handled by the
 	 * ModifyTable node instead.)
 	 */
 	if (parse->rowMarks)
@@ -1991,17 +2094,19 @@ preprocess_rowmarks(PlannerInfo *root)
 	if (parse->rowMarks)
 	{
 		/*
-		 * We've got trouble if FOR [KEY] UPDATE/SHARE appears inside grouping,
-		 * since grouping renders a reference to individual tuple CTIDs
-		 * invalid.  This is also checked at parse time, but that's
+		 * We've got trouble if FOR [KEY] UPDATE/SHARE appears inside
+		 * grouping, since grouping renders a reference to individual tuple
+		 * CTIDs invalid.  This is also checked at parse time, but that's
 		 * insufficient because of rule substitution, query pullup, etc.
 		 */
-		CheckSelectLocking(parse);
+		CheckSelectLocking(parse, ((RowMarkClause *)
+							linitial(parse->rowMarks))->strength);
 	}
 	else
 	{
 		/*
-		 * We only need rowmarks for UPDATE, DELETE, or FOR [KEY] UPDATE/SHARE.
+		 * We only need rowmarks for UPDATE, DELETE, or FOR [KEY]
+		 * UPDATE/SHARE.
 		 */
 		if (parse->commandType != CMD_UPDATE &&
 			parse->commandType != CMD_DELETE)
@@ -2302,7 +2407,7 @@ preprocess_limit(PlannerInfo *root, double tuple_fraction,
  *
  * If we have constant-zero OFFSET and constant-null LIMIT, we can skip adding
  * a Limit node.  This is worth checking for because "OFFSET 0" is a common
- * locution for an optimization fence.  (Because other places in the planner
+ * locution for an optimization fence.	(Because other places in the planner
  * merely check whether parse->limitOffset isn't NULL, it will still work as
  * an optimization fence --- we're just suppressing unnecessary run-time
  * overhead.)
@@ -2337,7 +2442,7 @@ limit_needed(Query *parse)
 			/* Treat NULL as no offset; the executor would too */
 			if (!((Const *) node)->constisnull)
 			{
-				int64	offset = DatumGetInt64(((Const *) node)->constvalue);
+				int64		offset = DatumGetInt64(((Const *) node)->constvalue);
 
 				/* Executor would treat less-than-zero same as zero */
 				if (offset > 0)
@@ -2440,6 +2545,88 @@ preprocess_groupclause(PlannerInfo *root)
 }
 
 /*
+ * Compute query_pathkeys and other pathkeys during plan generation
+ */
+static void
+standard_qp_callback(PlannerInfo *root, void *extra)
+{
+	Query	   *parse = root->parse;
+	standard_qp_extra *qp_extra = (standard_qp_extra *) extra;
+	List	   *tlist = qp_extra->tlist;
+	List	   *activeWindows = qp_extra->activeWindows;
+
+	/*
+	 * Calculate pathkeys that represent grouping/ordering requirements.  The
+	 * sortClause is certainly sort-able, but GROUP BY and DISTINCT might not
+	 * be, in which case we just leave their pathkeys empty.
+	 */
+	if (parse->groupClause &&
+		grouping_is_sortable(parse->groupClause))
+		root->group_pathkeys =
+			make_pathkeys_for_sortclauses(root,
+										  parse->groupClause,
+										  tlist);
+	else
+		root->group_pathkeys = NIL;
+
+	/* We consider only the first (bottom) window in pathkeys logic */
+	if (activeWindows != NIL)
+	{
+		WindowClause *wc = (WindowClause *) linitial(activeWindows);
+
+		root->window_pathkeys = make_pathkeys_for_window(root,
+														 wc,
+														 tlist);
+	}
+	else
+		root->window_pathkeys = NIL;
+
+	if (parse->distinctClause &&
+		grouping_is_sortable(parse->distinctClause))
+		root->distinct_pathkeys =
+			make_pathkeys_for_sortclauses(root,
+										  parse->distinctClause,
+										  tlist);
+	else
+		root->distinct_pathkeys = NIL;
+
+	root->sort_pathkeys =
+		make_pathkeys_for_sortclauses(root,
+									  parse->sortClause,
+									  tlist);
+
+	/*
+	 * Figure out whether we want a sorted result from query_planner.
+	 *
+	 * If we have a sortable GROUP BY clause, then we want a result sorted
+	 * properly for grouping.  Otherwise, if we have window functions to
+	 * evaluate, we try to sort for the first window.  Otherwise, if there's a
+	 * sortable DISTINCT clause that's more rigorous than the ORDER BY clause,
+	 * we try to produce output that's sufficiently well sorted for the
+	 * DISTINCT.  Otherwise, if there is an ORDER BY clause, we want to sort
+	 * by the ORDER BY clause.
+	 *
+	 * Note: if we have both ORDER BY and GROUP BY, and ORDER BY is a superset
+	 * of GROUP BY, it would be tempting to request sort by ORDER BY --- but
+	 * that might just leave us failing to exploit an available sort order at
+	 * all.  Needs more thought.  The choice for DISTINCT versus ORDER BY is
+	 * much easier, since we know that the parser ensured that one is a
+	 * superset of the other.
+	 */
+	if (root->group_pathkeys)
+		root->query_pathkeys = root->group_pathkeys;
+	else if (root->window_pathkeys)
+		root->query_pathkeys = root->window_pathkeys;
+	else if (list_length(root->distinct_pathkeys) >
+			 list_length(root->sort_pathkeys))
+		root->query_pathkeys = root->distinct_pathkeys;
+	else if (root->sort_pathkeys)
+		root->query_pathkeys = root->sort_pathkeys;
+	else
+		root->query_pathkeys = NIL;
+}
+
+/*
  * choose_hashed_grouping - should we use hashed grouping?
  *
  * Returns TRUE to select hashing, FALSE to select sorting.
@@ -2526,8 +2713,8 @@ choose_hashed_grouping(PlannerInfo *root,
 	 * We need to consider cheapest_path + hashagg [+ final sort] versus
 	 * either cheapest_path [+ sort] + group or agg [+ final sort] or
 	 * presorted_path + group or agg [+ final sort] where brackets indicate a
-	 * step that may not be needed. We assume query_planner() will have
-	 * returned a presorted path only if it's a winner compared to
+	 * step that may not be needed.  We assume grouping_planner() will have
+	 * passed us a presorted path only if it's a winner compared to
 	 * cheapest_path for this purpose.
 	 *
 	 * These path variables are dummies that just hold cost fields; we don't
@@ -2580,12 +2767,8 @@ choose_hashed_grouping(PlannerInfo *root,
 				  0.0, work_mem, limit_tuples);
 
 	/*
-	 * Now make the decision using the top-level tuple fraction.  First we
-	 * have to convert an absolute count (LIMIT) into fractional form.
+	 * Now make the decision using the top-level tuple fraction.
 	 */
-	if (tuple_fraction >= 1.0)
-		tuple_fraction /= dNumGroups;
-
 	if (compare_fractional_path_costs(&hashed_p, &sorted_p,
 									  tuple_fraction) < 0)
 	{
@@ -2665,7 +2848,11 @@ choose_hashed_distinct(PlannerInfo *root,
 	 * Don't do it if it doesn't look like the hashtable will fit into
 	 * work_mem.
 	 */
+
+	/* Estimate per-hash-entry space at tuple width... */
 	hashentrysize = MAXALIGN(path_width) + MAXALIGN(sizeof(MinimalTupleData));
+	/* plus the per-hash-entry overhead */
+	hashentrysize += hash_agg_entry_size(0);
 
 	if (hashentrysize * dNumDistinctRows > work_mem * 1024L)
 		return false;
@@ -2731,12 +2918,8 @@ choose_hashed_distinct(PlannerInfo *root,
 				  0.0, work_mem, limit_tuples);
 
 	/*
-	 * Now make the decision using the top-level tuple fraction.  First we
-	 * have to convert an absolute count (LIMIT) into fractional form.
+	 * Now make the decision using the top-level tuple fraction.
 	 */
-	if (tuple_fraction >= 1.0)
-		tuple_fraction /= dNumDistinctRows;
-
 	if (compare_fractional_path_costs(&hashed_p, &sorted_p,
 									  tuple_fraction) < 0)
 	{
@@ -2781,7 +2964,8 @@ choose_hashed_distinct(PlannerInfo *root,
  * 'groupColIdx' receives an array of column numbers for the GROUP BY
  *			expressions (if there are any) in the returned target list.
  * 'need_tlist_eval' is set true if we really need to evaluate the
- *			returned tlist as-is.
+ *			returned tlist as-is.  (Note: locate_grouping_columns assumes
+ *			that if this is FALSE, all grouping columns are simple Vars.)
  *
  * The result is the targetlist to be passed to query_planner.
  */
@@ -2944,6 +3128,7 @@ get_grouping_column_index(Query *parse, TargetEntry *tle)
  * This is only needed if we don't use the sub_tlist chosen by
  * make_subplanTargetList.	We have to forget the column indexes found
  * by that routine and re-locate the grouping exprs in the real sub_tlist.
+ * We assume the grouping exprs are just Vars (see make_subplanTargetList).
  */
 static void
 locate_grouping_columns(PlannerInfo *root,
@@ -2967,11 +3152,24 @@ locate_grouping_columns(PlannerInfo *root,
 	foreach(gl, root->parse->groupClause)
 	{
 		SortGroupClause *grpcl = (SortGroupClause *) lfirst(gl);
-		Node	   *groupexpr = get_sortgroupclause_expr(grpcl, tlist);
-		TargetEntry *te = tlist_member(groupexpr, sub_tlist);
+		Var		   *groupexpr = (Var *) get_sortgroupclause_expr(grpcl, tlist);
+		TargetEntry *te;
 
+		/*
+		 * The grouping column returned by create_plan might not have the same
+		 * typmod as the original Var.	(This can happen in cases where a
+		 * set-returning function has been inlined, so that we now have more
+		 * knowledge about what it returns than we did when the original Var
+		 * was created.)  So we can't use tlist_member() to search the tlist;
+		 * instead use tlist_member_match_var.	For safety, still check that
+		 * the vartype matches.
+		 */
+		if (!(groupexpr && IsA(groupexpr, Var)))
+			elog(ERROR, "grouping column is not a Var as expected");
+		te = tlist_member_match_var(groupexpr, sub_tlist);
 		if (!te)
 			elog(ERROR, "failed to locate grouping columns");
+		Assert(((Var *) te->expr)->vartype == groupexpr->vartype);
 		groupColIdx[keyno++] = te->resno;
 	}
 }
@@ -3089,7 +3287,7 @@ select_active_windows(PlannerInfo *root, WindowFuncLists *wflists)
  *
  * When grouping_planner inserts one or more WindowAgg nodes into the plan,
  * this function computes the initial target list to be computed by the node
- * just below the first WindowAgg.  This list must contain all values needed
+ * just below the first WindowAgg.	This list must contain all values needed
  * to evaluate the window functions, compute the final target list, and
  * perform any required final sort step.  If multiple WindowAggs are needed,
  * each intermediate one adds its window function results onto this tlist;
@@ -3097,7 +3295,7 @@ select_active_windows(PlannerInfo *root, WindowFuncLists *wflists)
  *
  * This function is much like make_subplanTargetList, though not quite enough
  * like it to share code.  As in that function, we flatten most expressions
- * into their component variables.  But we do not want to flatten window
+ * into their component variables.	But we do not want to flatten window
  * PARTITION BY/ORDER BY clauses, since that might result in multiple
  * evaluations of them, which would be bad (possibly even resulting in
  * inconsistent answers, if they contain volatile functions).  Also, we must
@@ -3235,7 +3433,7 @@ make_windowInputTargetList(PlannerInfo *root,
  */
 static List *
 make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
-						 List *tlist, bool canonicalize)
+						 List *tlist)
 {
 	List	   *window_pathkeys;
 	List	   *window_sortclauses;
@@ -3257,8 +3455,7 @@ make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 									 list_copy(wc->orderClause));
 	window_pathkeys = make_pathkeys_for_sortclauses(root,
 													window_sortclauses,
-													tlist,
-													canonicalize);
+													tlist);
 	list_free(window_sortclauses);
 	return window_pathkeys;
 }
@@ -3336,8 +3533,7 @@ get_column_info_for_window(PlannerInfo *root, WindowClause *wc, List *tlist,
 			sortclauses = lappend(sortclauses, sgc);
 			new_pathkeys = make_pathkeys_for_sortclauses(root,
 														 sortclauses,
-														 tlist,
-														 true);
+														 tlist);
 			if (list_length(new_pathkeys) > list_length(pathkeys))
 			{
 				/* this sort clause is actually significant */
@@ -3355,8 +3551,7 @@ get_column_info_for_window(PlannerInfo *root, WindowClause *wc, List *tlist,
 			sortclauses = lappend(sortclauses, sgc);
 			new_pathkeys = make_pathkeys_for_sortclauses(root,
 														 sortclauses,
-														 tlist,
-														 true);
+														 tlist);
 			if (list_length(new_pathkeys) > list_length(pathkeys))
 			{
 				/* this sort clause is actually significant */
@@ -3457,7 +3652,7 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	rte = makeNode(RangeTblEntry);
 	rte->rtekind = RTE_RELATION;
 	rte->relid = tableOid;
-	rte->relkind = RELKIND_RELATION;  /* Don't be too picky. */
+	rte->relkind = RELKIND_RELATION;	/* Don't be too picky. */
 	rte->lateral = false;
 	rte->inh = false;
 	rte->inFromCl = true;
