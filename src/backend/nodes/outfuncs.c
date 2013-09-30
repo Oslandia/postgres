@@ -1008,6 +1008,7 @@ _outFuncExpr(StringInfo str, const FuncExpr *node)
 	WRITE_OID_FIELD(inputcollid);
 	WRITE_NODE_FIELD(args);
 	WRITE_LOCATION_FIELD(location);
+	WRITE_BOOL_FIELD(nested);
 }
 
 static void

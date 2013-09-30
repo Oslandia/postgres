@@ -389,6 +389,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		/* funccollid and inputcollid will be set by parse_collate.c */
 		funcexpr->args = fargs;
 		funcexpr->location = location;
+		funcexpr->nested = false;
 
 		retval = (Node *) funcexpr;
 	}

@@ -467,6 +467,7 @@ makeFuncExpr(Oid funcid, Oid rettype, List *args,
 	funcexpr->inputcollid = inputcollid;
 	funcexpr->args = args;
 	funcexpr->location = -1;
+        funcexpr->nested = 0;
 
 	return funcexpr;
 }

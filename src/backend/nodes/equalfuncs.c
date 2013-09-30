@@ -246,6 +246,7 @@ _equalFuncExpr(const FuncExpr *a, const FuncExpr *b)
 	COMPARE_SCALAR_FIELD(inputcollid);
 	COMPARE_NODE_FIELD(args);
 	COMPARE_LOCATION_FIELD(location);
+	COMPARE_SCALAR_FIELD(nested);
 
 	return true;
 }

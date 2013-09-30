@@ -544,6 +544,7 @@ _readFuncExpr(void)
 	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
+        READ_BOOL_FIELD(nested);
 
 	READ_DONE();
 }

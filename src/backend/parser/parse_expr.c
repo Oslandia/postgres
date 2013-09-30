@@ -49,7 +49,7 @@ static Node *transformAExprDistinct(ParseState *pstate, A_Expr *a);
 static Node *transformAExprNullIf(ParseState *pstate, A_Expr *a);
 static Node *transformAExprOf(ParseState *pstate, A_Expr *a);
 static Node *transformAExprIn(ParseState *pstate, A_Expr *a);
-static Node *transformFuncCall(ParseState *pstate, FuncCall *fn);
+static Node *transformFuncCall(ParseState *pstate, FuncCall *fn, bool nested);
 static Node *transformCaseExpr(ParseState *pstate, CaseExpr *c);
 static Node *transformSubLink(ParseState *pstate, SubLink *sublink);
 static Node *transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
@@ -121,7 +121,7 @@ transformExpr(ParseState *pstate, Node *expr, ParseExprKind exprKind)
 }
 
 static Node *
-transformExprRecurse(ParseState *pstate, Node *expr)
+transformExprRec(ParseState *pstate, Node *expr, bool nested)
 {
 	Node	   *result;
 
@@ -154,7 +154,7 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			{
 				A_Indirection *ind = (A_Indirection *) expr;
 
-				result = transformExprRecurse(pstate, ind->arg);
+				result = transformExprRec(pstate, ind->arg, nested);
 				result = transformIndirection(pstate, result,
 											  ind->indirection);
 				break;
@@ -258,14 +258,14 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			}
 
 		case T_FuncCall:
-			result = transformFuncCall(pstate, (FuncCall *) expr);
+		        result = transformFuncCall(pstate, (FuncCall *) expr, nested);
 			break;
 
 		case T_NamedArgExpr:
 			{
 				NamedArgExpr *na = (NamedArgExpr *) expr;
 
-				na->arg = (Expr *) transformExprRecurse(pstate, (Node *) na->arg);
+				na->arg = (Expr *) transformExprRec(pstate, (Node *) na->arg, nested);
 				result = expr;
 				break;
 			}
@@ -302,7 +302,7 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			{
 				NullTest   *n = (NullTest *) expr;
 
-				n->arg = (Expr *) transformExprRecurse(pstate, (Node *) n->arg);
+				n->arg = (Expr *) transformExprRec(pstate, (Node *) n->arg, nested);
 				/* the argument can be any type, so don't coerce it */
 				n->argisrow = type_is_rowtype(exprType((Node *) n->arg));
 				result = expr;
@@ -362,6 +362,12 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 	}
 
 	return result;
+}
+
+static Node *
+transformExprRecurse(ParseState *pstate, Node *expr )
+{
+    return transformExprRec( pstate, expr, false );
 }
 
 /*
@@ -1237,30 +1243,38 @@ transformAExprIn(ParseState *pstate, A_Expr *a)
 }
 
 static Node *
-transformFuncCall(ParseState *pstate, FuncCall *fn)
+transformFuncCall(ParseState *pstate, FuncCall *fn, bool nested)
 {
 	List	   *targs;
 	ListCell   *args;
+	Node       *node;
 
 	/* Transform the list of arguments ... */
 	targs = NIL;
 	foreach(args, fn->args)
 	{
-		targs = lappend(targs, transformExprRecurse(pstate,
-													(Node *) lfirst(args)));
+		targs = lappend(targs, transformExprRec(pstate,
+							    (Node *) lfirst(args),
+							    /* nested */ true));
 	}
 
 	/* ... and hand off to ParseFuncOrColumn */
-	return ParseFuncOrColumn(pstate,
-							 fn->funcname,
-							 targs,
-							 fn->agg_order,
-							 fn->agg_star,
-							 fn->agg_distinct,
-							 fn->func_variadic,
-							 fn->over,
-							 false,
-							 fn->location);
+	node = ParseFuncOrColumn(pstate,
+				 fn->funcname,
+				 targs,
+				 fn->agg_order,
+				 fn->agg_star,
+				 fn->agg_distinct,
+				 fn->func_variadic,
+				 fn->over,
+				 false,
+				 fn->location);
+
+	if ( IsA(node, FuncExpr) ) {
+	    FuncExpr *fe = (FuncExpr*)(node);
+	    fe->nested = nested;
+	}
+	return node;
 }
 
 static Node *

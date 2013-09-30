@@ -1705,7 +1705,6 @@ restart:
 	 * function).  Otherwise, collect the current argument values into fcinfo.
 	 */
 	fcinfo = &fcache->fcinfo_data;
-	fcinfo->nested = fcache->nested;
 	arguments = fcache->args;
 	if (!fcache->setArgsValid)
 	{
@@ -4485,10 +4484,7 @@ ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 				FuncExpr   *funcexpr = (FuncExpr *) node;
 				FuncExprState *fstate = makeNode(FuncExprState);
 				
-				if ( parentNode ) {
-				    elog(NOTICE, "parentNode: %d", nodeTag(parentNode) );
-				}
-				fstate->nested = (parentNode != NULL) && (nodeTag(parentNode) == T_FuncExpr);
+				fstate->fcinfo_data.nested = funcexpr->nested;
 				fstate->xprstate.evalfunc = (ExprStateEvalFunc) ExecEvalFunc;
 				fstate->args = (List *)
 				    ExecInitExprRec((Expr *) funcexpr->args, parent, node);
