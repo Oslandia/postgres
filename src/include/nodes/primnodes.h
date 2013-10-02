@@ -355,7 +355,7 @@ typedef struct FuncExpr
 	Oid			inputcollid;	/* OID of collation that function should use */
 	List	   *args;			/* arguments to the function */
 	int			location;		/* token location, or -1 if unknown */
-        bool nested;
+    bool        nested;         /* true if the function call is nested in another call */
 } FuncExpr;
 
 /*

@@ -71,7 +71,7 @@ typedef struct FunctionCallInfoData
 	Oid			fncollation;	/* collation for function to use */
 	bool		isnull;			/* function must set true if result is NULL */
 	short		nargs;			/* # arguments actually passed */
-        bool            nested;
+    bool        nested;         /* is the function call nested in another function call ? */
 	Datum		arg[FUNC_MAX_ARGS];		/* Arguments passed to function */
 	bool		argnull[FUNC_MAX_ARGS]; /* T if arg[i] is actually NULL */
 } FunctionCallInfoData;

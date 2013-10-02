@@ -111,7 +111,7 @@ static Expr *simplify_function(Oid funcid,
 				  Oid result_type, int32 result_typmod,
 				  Oid result_collid, Oid input_collid, List **args_p,
 				  bool funcvariadic, bool process_args, bool allow_non_const,
-                               bool nested,
+                  bool nested,
 				  eval_const_expressions_context *context);
 static List *expand_function_arguments(List *args, Oid result_type,
 						  HeapTuple func_tuple);
@@ -124,7 +124,7 @@ static Expr *evaluate_function(Oid funcid, Oid result_type, int32 result_typmod,
 				  Oid result_collid, Oid input_collid, List *args,
 				  bool funcvariadic,
 				  HeapTuple func_tuple,
-                               bool nested,
+                  bool nested,
 				  eval_const_expressions_context *context);
 static Expr *inline_function(Oid funcid, Oid result_type, Oid result_collid,
 				Oid input_collid, List *args,
@@ -2276,13 +2276,13 @@ eval_const_expressions_mutator(Node *node,
 										   expr->funcvariadic,
 										   true,
 										   true,
-                                                           expr->nested,
+                                           expr->nested,
 										   context);
 				if (simple)		/* successfully simplified it */
-                                {
-                                    ((FuncExpr*)simple)->nested = expr->nested;
-                                    return (Node *) simple;
-                                }
+                {
+					((FuncExpr*)simple)->nested = expr->nested;
+					return (Node *) simple;
+				}
 
 				/*
 				 * The expression cannot be simplified any further, so build
@@ -2300,7 +2300,7 @@ eval_const_expressions_mutator(Node *node,
 				newexpr->inputcollid = expr->inputcollid;
 				newexpr->args = args;
 				newexpr->location = expr->location;
-                                newexpr->nested = expr->nested;
+				newexpr->nested = expr->nested;
 				return (Node *) newexpr;
 			}
 		case T_OpExpr:
@@ -2328,7 +2328,7 @@ eval_const_expressions_mutator(Node *node,
 										   false,
 										   true,
 										   true,
-                                                           /* nested */ false,
+										   /* nested */ false,
 										   context);
 				if (simple)		/* successfully simplified it */
 					return (Node *) simple;
@@ -2433,7 +2433,7 @@ eval_const_expressions_mutator(Node *node,
 											   false,
 											   false,
 											   false,
-                                                                   /* nested */ false,
+											   /* nested */ false,
 											   context);
 					if (simple) /* successfully simplified it */
 					{
@@ -2638,7 +2638,7 @@ eval_const_expressions_mutator(Node *node,
 										   false,
 										   true,
 										   true,
-                                                           /* nested */ false,
+										   /* nested */ false,
 										   context);
 				if (simple)		/* successfully simplified output fn */
 				{
@@ -2671,7 +2671,7 @@ eval_const_expressions_mutator(Node *node,
 											   false,
 											   false,
 											   true,
-                                                                   /* nested */ false,
+											   /* nested */ false,
 											   context);
 					if (simple) /* successfully simplified input fn */
 						return (Node *) simple;

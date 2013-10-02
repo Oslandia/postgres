@@ -1207,7 +1207,7 @@ _copyFuncExpr(const FuncExpr *from)
 	COPY_SCALAR_FIELD(inputcollid);
 	COPY_NODE_FIELD(args);
 	COPY_LOCATION_FIELD(location);
-        COPY_SCALAR_FIELD(nested);
+    COPY_SCALAR_FIELD(nested);
 
 	return newnode;
 }

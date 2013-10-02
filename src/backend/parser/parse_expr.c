@@ -39,6 +39,7 @@
 bool		Transform_null_equals = false;
 
 static Node *transformExprRecurse(ParseState *pstate, Node *expr);
+static Node *transformExprRec(ParseState *pstate, Node *expr, bool nested);
 static Node *transformParamRef(ParseState *pstate, ParamRef *pref);
 static Node *transformAExprOp(ParseState *pstate, A_Expr *a);
 static Node *transformAExprAnd(ParseState *pstate, A_Expr *a);
@@ -1282,7 +1283,7 @@ transformFuncCall(ParseState *pstate, FuncCall *fn, bool nested)
 							 fn->over,
 							 false,
 							 fn->location);
-	
+
 	if ( IsA(node, FuncExpr) ) {
 	    FuncExpr *fe = (FuncExpr*)(node);
 	    fe->nested = nested;

@@ -4337,6 +4337,18 @@ ExecEvalExprSwitchContext(ExprState *expression,
  * associated with a plan tree.  (If so, it can't have aggs or subplans.)
  * This case should usually come through ExecPrepareExpr, not directly here.
  */
+
+ExprState *
+ExecInitExpr(Expr *node, PlanState *parent)
+{
+    return ExecInitExprRec(node, parent, NULL);
+}
+
+/*
+ * ExecInitExprRec: used by ExecInitExpr
+ *
+ * The additional parameter 'parentNode' is the expression node parent of 'node'.
+ */
 static ExprState *
 ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 {
@@ -4499,7 +4511,7 @@ ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 			{
 				FuncExpr   *funcexpr = (FuncExpr *) node;
 				FuncExprState *fstate = makeNode(FuncExprState);
-				
+
 				fstate->fcinfo_data.nested = funcexpr->nested;
 				fstate->xprstate.evalfunc = (ExprStateEvalFunc) ExecEvalFunc;
 				fstate->args = (List *)
@@ -5042,12 +5054,6 @@ ExecInitExprRec(Expr *node, PlanState *parent, Expr *parentNode )
 	state->expr = node;
 
 	return state;
-}
-
-ExprState *
-ExecInitExpr(Expr *node, PlanState *parent)
-{
-    return ExecInitExprRec(node, parent, NULL);
 }
 
 /*
